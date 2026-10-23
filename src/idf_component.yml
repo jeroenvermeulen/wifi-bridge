@@ -1,0 +1,6 @@
+dependencies:
+  # USB console on the ESP32-S2, see usb_console.c.
+  espressif/esp_tinyusb:
+    version: "^1.4.4"
+    rules:
+      - if: "target == esp32s2"

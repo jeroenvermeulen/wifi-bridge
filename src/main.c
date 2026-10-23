@@ -1,6 +1,6 @@
 // Transparent WiFi <-> Ethernet bridge for a single wired device.
 //
-// The ESP32-S3 joins the WiFi network as a station using the MAC address of
+// The ESP32 joins the WiFi network as a station using the MAC address of
 // the device plugged into the W5500 port ("MAC cloning"), then copies raw
 // Ethernet frames in both directions. The ESP itself has no IP address; the
 // wired device gets its address straight from the WiFi network's router.
@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_private/wifi.h"
 #include "esp_eth.h"
@@ -27,6 +28,7 @@
 
 // Patched copy of the ESP-IDF W5500 MAC driver, see w5500/w5500_mac.c.
 esp_eth_mac_t *bridge_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, const eth_mac_config_t *mac_config);
+void usb_console_init(void);  // no-op unless the board uses TinyUSB, see usb_console.c
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -34,34 +36,21 @@ esp_eth_mac_t *bridge_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, 
 #error "Copy src/wifi_credentials.example.h to src/wifi_credentials.h and fill in your network"
 #endif
 
-// W5500 wiring, from the seller's schematic. RST has a 10k pull-down, so the
-// driver must actively release it.
-#define PIN_MOSI 11
-#define PIN_MISO 13
-#define PIN_SCLK 12
-#define PIN_CS 10
-#define PIN_INT 14
-#define PIN_RST 15
-#define W5500_SPI_HZ (36 * 1000 * 1000)
-// Ethernet link mode. The W5500 on this board can't hold a 100 Mbit link:
-// forced 100 Mbit gets no link, autonegotiation picks 100 Mbit and drops it
-// every few seconds. See
-// https://github.com/jeroenvermeulen/esp32-s3-poe-w5500-n16r8-dev-board
-// So the link is forced to 10 Mbit. Duplex must match the peer: a standard
-// autonegotiating peer falls back to half duplex against a forced link, but
-// some (e.g. Realtek USB 2.5G adapters) only do 10 Mbit full. A mismatch
-// shows up as slow WiFi->Ethernet throughput.
-// ETH_AUTONEGOTIATE=1 also works with peers that "downshift" after failed
-// 100 Mbit attempts: it flaps for ~15 s, then settles at 10 Mbit with the
-// right duplex.
-#ifndef ETH_AUTONEGOTIATE
-#define ETH_AUTONEGOTIATE 0
+// Board settings (W5500 pins, SPI clock, Ethernet link mode) come from
+// Kconfig, set per board in boards/<board>.defaults.
+#if CONFIG_BRIDGE_PIN_MOSI < 0 || CONFIG_BRIDGE_PIN_MISO < 0 || CONFIG_BRIDGE_PIN_SCLK < 0 || CONFIG_BRIDGE_PIN_CS < 0
+#error "W5500 SPI pins not set: build one of the environments in platformio.ini"
 #endif
-#ifndef ETH_FORCE_SPEED
-#define ETH_FORCE_SPEED ETH_SPEED_10M
+#define W5500_POLL_MS 1  // used when INT is not connected
+#if CONFIG_BRIDGE_ETH_SPEED_100M
+#define ETH_FORCED_SPEED ETH_SPEED_100M
+#else
+#define ETH_FORCED_SPEED ETH_SPEED_10M
 #endif
-#ifndef ETH_FORCE_DUPLEX
-#define ETH_FORCE_DUPLEX ETH_DUPLEX_FULL
+#if CONFIG_BRIDGE_ETH_DUPLEX_HALF
+#define ETH_FORCED_DUPLEX ETH_DUPLEX_HALF
+#else
+#define ETH_FORCED_DUPLEX ETH_DUPLEX_FULL
 #endif
 
 #define ETH2WIFI_QUEUE_LEN 32
@@ -70,6 +59,12 @@ esp_eth_mac_t *bridge_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, 
 #define WIFI2ETH_QUEUE_LEN 64
 #define MAC_SWITCH_IDLE_US (10 * 1000 * 1000)  // old MAC must be silent this long before we re-clone
 #define STATS_INTERVAL_MS 10000
+// Roaming: on a multi-AP network the bridge was seen stuck on a far AP at
+// -86 dBm (~70 KB/s). Below ROAM_RSSI, scan every ROAM_CHECK_STATS stats
+// intervals and reconnect if another AP is at least ROAM_GAIN_DB stronger.
+#define ROAM_RSSI (-75)
+#define ROAM_GAIN_DB 10
+#define ROAM_CHECK_STATS 6
 
 static const char *TAG = "bridge";
 
@@ -91,7 +86,7 @@ static uint8_t s_candidate_mac[6];  // newly seen MAC waiting for ctrl task
 static int64_t s_clone_last_seen_us;
 
 static struct {
-    uint32_t eth2wifi, wifi2eth, eth2wifi_drop, wifi2eth_qfull, wifi2eth_txerr, echo, foreign_src;
+    uint32_t eth2wifi, wifi2eth, eth2wifi_qfull, eth2wifi_drop, wifi2eth_qfull, wifi2eth_txerr, echo, foreign_src;
     uint32_t tx_slow;
     int64_t tx_us_total, tx_us_max;
 } s_stats;
@@ -184,7 +179,7 @@ static esp_err_t eth_rx(esp_eth_handle_t eth, uint8_t *buffer, uint32_t len, voi
     } else if (s_wifi_up) {
         frame_t f = {.buf = buffer, .len = len};
         if (xQueueSend(s_eth2wifi_q, &f, 0) == pdTRUE) return ESP_OK;
-        s_stats.eth2wifi_drop++;
+        s_stats.eth2wifi_qfull++;
     }
     free(buffer);
     return ESP_OK;
@@ -257,6 +252,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     switch (id) {
     case WIFI_EVENT_STA_START:
         esp_wifi_set_ps(WIFI_PS_NONE);
+        if (CONFIG_BRIDGE_WIFI_MAX_TX_POWER) esp_wifi_set_max_tx_power(CONFIG_BRIDGE_WIFI_MAX_TX_POWER);
         esp_wifi_connect();
         break;
     case WIFI_EVENT_STA_CONNECTED:
@@ -331,65 +327,98 @@ static void ctrl_task(void *arg)
     }
 }
 
+// Scans for our SSID while connected to `cur`; if a clearly stronger AP
+// exists, disconnects so the reconnect (sorted by signal) picks it.
+static void maybe_roam(const wifi_ap_record_t *cur)
+{
+    static wifi_ap_record_t recs[16];
+    wifi_scan_config_t scan = {.ssid = (uint8_t *)BRIDGE_WIFI_SSID};
+    uint16_t n = sizeof(recs) / sizeof(recs[0]);
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) return;
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) return;
+    const wifi_ap_record_t *best = NULL;
+    for (int i = 0; i < n; i++) {
+        if (!best || recs[i].rssi > best->rssi) best = &recs[i];
+    }
+    if (best && best->rssi >= cur->rssi + ROAM_GAIN_DB && memcmp(best->bssid, cur->bssid, 6) != 0) {
+        ESP_LOGW(TAG, "Roaming: AP " MACSTR " at %d dBm, current %d dBm", MAC2STR(best->bssid), best->rssi, cur->rssi);
+        esp_wifi_disconnect();
+    }
+}
+
 static void stats_task(void *arg)
 {
-    for (;;) {
+    for (int n = 1;; n++) {
         vTaskDelay(pdMS_TO_TICKS(STATS_INTERVAL_MS));
         wifi_ap_record_t ap = {0};
         if (s_wifi_up && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             ESP_LOGI(TAG, "AP " MACSTR " ch %d rssi %d dBm phy %s%s%s", MAC2STR(ap.bssid), ap.primary, ap.rssi,
                      ap.phy_11b ? "b" : "", ap.phy_11g ? "g" : "", ap.phy_11n ? "n" : "");
+            if (ap.rssi < ROAM_RSSI && n % ROAM_CHECK_STATS == 0) maybe_roam(&ap);
         }
-        ESP_LOGI(TAG, "wifi=%s eth=%s | eth->wifi %lu (drop %lu) | wifi->eth %lu (qfull %lu, txerr %lu) | echo %lu other-src %lu",
+        ESP_LOGI(TAG, "wifi=%s eth=%s | eth->wifi %lu (qfull %lu, txerr %lu) | wifi->eth %lu (qfull %lu, txerr %lu) | echo %lu other-src %lu",
                  s_wifi_up ? "up" : "down", s_eth_up ? "up" : "down",
-                 s_stats.eth2wifi, s_stats.eth2wifi_drop, s_stats.wifi2eth, s_stats.wifi2eth_qfull,
+                 s_stats.eth2wifi, s_stats.eth2wifi_qfull, s_stats.eth2wifi_drop, s_stats.wifi2eth, s_stats.wifi2eth_qfull,
                  s_stats.wifi2eth_txerr, s_stats.echo, s_stats.foreign_src);
-        ESP_LOGI(TAG, "heap free %lu (min %lu) | eth tx: avg %lld us, max %lld us, >5ms %lu",
-                 (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size(), s_stats.wifi2eth ? s_stats.tx_us_total / s_stats.wifi2eth : 0,
+        ESP_LOGI(TAG, "internal heap free %u (min %u) | eth tx: avg %lld us, max %lld us, >5ms %lu",
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), s_stats.wifi2eth ? s_stats.tx_us_total / s_stats.wifi2eth : 0,
                  s_stats.tx_us_max, s_stats.tx_slow);
     }
 }
 
-static void eth_init(void)
+// Returns false if the W5500 doesn't answer (wiring, power), so the caller can
+// retry instead of aborting. A boot loop would also take the USB console down.
+static bool eth_init(void)
 {
+    static bool bus_ready;
     spi_bus_config_t bus = {
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = PIN_MISO,
-        .sclk_io_num = PIN_SCLK,
+        .mosi_io_num = CONFIG_BRIDGE_PIN_MOSI,
+        .miso_io_num = CONFIG_BRIDGE_PIN_MISO,
+        .sclk_io_num = CONFIG_BRIDGE_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    if (!bus_ready) {
+        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
+        ESP_ERROR_CHECK(gpio_install_isr_service(0));
+        bus_ready = true;
+    }
 
     spi_device_interface_config_t dev = {
         .mode = 0,
-        .clock_speed_hz = W5500_SPI_HZ,
+        .clock_speed_hz = CONFIG_BRIDGE_SPI_MHZ * 1000 * 1000,
         .queue_size = 20,
-        .spics_io_num = PIN_CS,
+        .spics_io_num = CONFIG_BRIDGE_PIN_CS,
     };
     eth_w5500_config_t w5500 = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &dev);
-    w5500.int_gpio_num = PIN_INT;
+    w5500.int_gpio_num = CONFIG_BRIDGE_PIN_INT;
+    if (w5500.int_gpio_num < 0) w5500.poll_period_ms = W5500_POLL_MS;
 
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
     mac_cfg.rx_task_stack_size = 4096;
     eth_phy_config_t phy_cfg = ETH_PHY_DEFAULT_CONFIG();
-    phy_cfg.reset_gpio_num = PIN_RST;
+    phy_cfg.reset_gpio_num = CONFIG_BRIDGE_PIN_RST;
 
     esp_eth_mac_t *mac = bridge_eth_mac_new_w5500(&w5500, &mac_cfg);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_cfg);
     esp_eth_config_t cfg = ETH_DEFAULT_CONFIG(mac, phy);
-    ESP_ERROR_CHECK(esp_eth_driver_install(&cfg, &s_eth));
+    esp_err_t err = esp_eth_driver_install(&cfg, &s_eth);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 not responding (%s), check wiring", esp_err_to_name(err));
+        mac->del(mac);
+        phy->del(phy);
+        return false;
+    }
 
     uint8_t own_mac[6];
     esp_read_mac(own_mac, ESP_MAC_ETH);
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_MAC_ADDR, own_mac));
     bool promiscuous = true;  // accept frames for the wired device's MAC, not just the W5500's
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous));
-#if !ETH_AUTONEGOTIATE
+#if !CONFIG_BRIDGE_ETH_AUTONEGOTIATE
     bool autonego = false;
-    eth_speed_t speed = ETH_FORCE_SPEED;
-    eth_duplex_t duplex = ETH_FORCE_DUPLEX;
+    eth_speed_t speed = ETH_FORCED_SPEED;
+    eth_duplex_t duplex = ETH_FORCED_DUPLEX;
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_AUTONEGO, &autonego));
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_SPEED, &speed));
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth, ETH_CMD_S_DUPLEX_MODE, &duplex));
@@ -397,6 +426,7 @@ static void eth_init(void)
     ESP_ERROR_CHECK(esp_eth_update_input_path(s_eth, eth_rx, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, eth_event, NULL));
     ESP_ERROR_CHECK(esp_eth_start(s_eth));
+    return true;
 }
 
 static void wifi_init(void)
@@ -410,6 +440,10 @@ static void wifi_init(void)
             .ssid = BRIDGE_WIFI_SSID,
             .password = BRIDGE_WIFI_PASSWORD,
             .threshold.authmode = WIFI_AUTH_OPEN,
+            // The default fast scan joins the first AP found with this SSID,
+            // which on a multi-AP network can be a far one.
+            .scan_method = WIFI_ALL_CHANNEL_SCAN,
+            .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
         },
     };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
@@ -418,6 +452,7 @@ static void wifi_init(void)
 
 void app_main(void)
 {
+    usb_console_init();
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -431,10 +466,10 @@ void app_main(void)
     xTaskCreate(ctrl_task, "ctrl", 4096, NULL, 5, &s_ctrl_task);
     xTaskCreate(eth2wifi_task, "eth2wifi", 4096, NULL, 15, NULL);
     xTaskCreate(wifi2eth_task, "wifi2eth", 4096, NULL, 15, NULL);
-    xTaskCreate(stats_task, "stats", 3072, NULL, 1, NULL);
+    xTaskCreate(stats_task, "stats", 4096, NULL, 1, NULL);
 
     wifi_init();
-    eth_init();
+    while (!eth_init()) vTaskDelay(pdMS_TO_TICKS(5000));
 
     uint8_t mac[6];
     if (load_mac(mac)) {

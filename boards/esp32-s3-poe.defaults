@@ -1,0 +1,22 @@
+# AliExpress "ESP32-S3 PoE W5500 N16R8" board.
+# https://github.com/jeroenvermeulen/esp32-s3-poe-w5500-n16r8-dev-board
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# W5500 wiring, from the seller's schematic. RST has a 10k pull-down, so the
+# driver must actively release it.
+CONFIG_BRIDGE_PIN_MOSI=11
+CONFIG_BRIDGE_PIN_MISO=13
+CONFIG_BRIDGE_PIN_SCLK=12
+CONFIG_BRIDGE_PIN_CS=10
+CONFIG_BRIDGE_PIN_INT=14
+CONFIG_BRIDGE_PIN_RST=15
+CONFIG_BRIDGE_SPI_MHZ=36
+
+# This board's W5500 can't hold 100 Mbit: forced 100 Mbit gets no link, and
+# autonegotiation picks 100 Mbit and drops it every few seconds. Autonegotiate
+# does work with peers that downshift after failed 100 Mbit attempts (the
+# link flaps for ~15 s first).
+CONFIG_BRIDGE_ETH_AUTONEGOTIATE=n
+CONFIG_BRIDGE_ETH_SPEED_10M=y
+CONFIG_BRIDGE_ETH_DUPLEX_FULL=y

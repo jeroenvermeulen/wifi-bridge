@@ -1,0 +1,33 @@
+# WEMOS LOLIN S2 Mini (ESP32-S2FN4R2) with a W5500 module (USR-ES1).
+# https://github.com/jeroenvermeulen/esp32-w5500
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# No USB-Serial/JTAG on the S2: the console runs over TinyUSB CDC, see
+# src/usb_console.c. Boot and panic messages go to UART0 (GPIO43), which is
+# not connected.
+CONFIG_TINYUSB_CDC_ENABLED=y
+# Above the bridge tasks (15): when TinyUSB's task is starved during traffic
+# bursts, its event queue overflows, and the console and esptool's reset
+# requests stop working until a power cycle.
+CONFIG_TINYUSB_TASK_PRIORITY=20
+
+# Internal RAM (~95 KB free) runs out under load with the WiFi buffer counts
+# from sdkconfig.defaults. The board has 2 MB PSRAM: put WiFi/LWIP buffers there.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# W5500 wiring. GPIO34-37 are the ESP32-S2's SPI2 IO_MUX pins, so SPI can run
+# at 40 MHz. RST is not connected.
+CONFIG_BRIDGE_PIN_MOSI=35
+CONFIG_BRIDGE_PIN_MISO=37
+CONFIG_BRIDGE_PIN_SCLK=36
+CONFIG_BRIDGE_PIN_CS=34
+CONFIG_BRIDGE_PIN_INT=33
+CONFIG_BRIDGE_PIN_RST=-1
+CONFIG_BRIDGE_SPI_MHZ=40
+
+# This module holds a 100 Mbit link.
+CONFIG_BRIDGE_ETH_AUTONEGOTIATE=y
+
+CONFIG_BRIDGE_WIFI_MAX_TX_POWER=34

@@ -1,0 +1,79 @@
+menu "WiFi bridge board"
+
+    comment "W5500 wiring. Each board sets these in boards/<board>.defaults"
+
+    config BRIDGE_PIN_MOSI
+        int "W5500 MOSI GPIO"
+        default -1
+
+    config BRIDGE_PIN_MISO
+        int "W5500 MISO GPIO"
+        default -1
+
+    config BRIDGE_PIN_SCLK
+        int "W5500 SCLK GPIO"
+        default -1
+
+    config BRIDGE_PIN_CS
+        int "W5500 CS GPIO"
+        default -1
+
+    config BRIDGE_PIN_INT
+        int "W5500 INT GPIO (-1: not connected, poll instead)"
+        default -1
+
+    config BRIDGE_PIN_RST
+        int "W5500 RST GPIO (-1: not connected)"
+        default -1
+
+    config BRIDGE_SPI_MHZ
+        int "W5500 SPI clock (MHz)"
+        range 1 80
+        default 20
+        help
+            Rounded down to 80 MHz divided by an integer (40, 26, 20, ...).
+            Above 26 MHz the pins must be the SPI2 IO_MUX pins.
+
+    config BRIDGE_ETH_AUTONEGOTIATE
+        bool "Autonegotiate Ethernet speed and duplex"
+        default y
+        help
+            Turn off to force the link mode below, for boards whose W5500
+            can't hold the speed it negotiates.
+
+    choice BRIDGE_ETH_SPEED
+        prompt "Forced Ethernet speed"
+        depends on !BRIDGE_ETH_AUTONEGOTIATE
+        default BRIDGE_ETH_SPEED_10M
+
+        config BRIDGE_ETH_SPEED_10M
+            bool "10 Mbit"
+        config BRIDGE_ETH_SPEED_100M
+            bool "100 Mbit"
+    endchoice
+
+    choice BRIDGE_ETH_DUPLEX
+        prompt "Forced Ethernet duplex"
+        depends on !BRIDGE_ETH_AUTONEGOTIATE
+        default BRIDGE_ETH_DUPLEX_FULL
+        help
+            Must match the wired device. An autonegotiating device falls back
+            to half duplex against a forced link, but some (e.g. Realtek USB
+            2.5G adapters) only do full. A mismatch shows up as slow
+            WiFi -> Ethernet throughput.
+
+        config BRIDGE_ETH_DUPLEX_HALF
+            bool "Half duplex"
+        config BRIDGE_ETH_DUPLEX_FULL
+            bool "Full duplex"
+    endchoice
+
+    config BRIDGE_WIFI_MAX_TX_POWER
+        int "WiFi max TX power in 0.25 dBm units (0: chip default)"
+        range 0 84
+        default 0
+        help
+            Some boards transmit badly at full power because of their antenna
+            or power supply, e.g. the LOLIN S2 Mini works best at 34 (8.5 dBm).
+
+endmenu

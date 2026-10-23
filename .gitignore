@@ -3,3 +3,5 @@
 sdkconfig.*
 !sdkconfig.defaults
 src/wifi_credentials.h
+managed_components/
+dependencies.lock
