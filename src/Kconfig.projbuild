@@ -1,45 +1,61 @@
 menu "WiFi bridge board"
 
-    comment "W5500 wiring. Each board sets these in boards/<board>.defaults"
+    comment "Ethernet chip and wiring. Each board sets these in boards/<board>.defaults"
+
+    choice BRIDGE_ETH_CHIP
+        prompt "Ethernet chip"
+        default BRIDGE_ETH_W5500
+
+        config BRIDGE_ETH_W5500
+            bool "W5500"
+        config BRIDGE_ETH_W5100
+            bool "W5100"
+            help
+                E.g. the Arduino Ethernet Shield. Its SPI moves one byte per
+                4-byte frame, and it can't report the link state, so the bridge
+                treats the link as always up. It always autonegotiates: leave
+                BRIDGE_ETH_AUTONEGOTIATE on.
+    endchoice
 
     config BRIDGE_PIN_MOSI
-        int "W5500 MOSI GPIO"
+        int "Ethernet chip MOSI GPIO"
         default -1
 
     config BRIDGE_PIN_MISO
-        int "W5500 MISO GPIO"
+        int "Ethernet chip MISO GPIO"
         default -1
 
     config BRIDGE_PIN_SCLK
-        int "W5500 SCLK GPIO"
+        int "Ethernet chip SCLK GPIO"
         default -1
 
     config BRIDGE_PIN_CS
-        int "W5500 CS GPIO"
+        int "Ethernet chip CS GPIO"
         default -1
 
     config BRIDGE_PIN_INT
-        int "W5500 INT GPIO (-1: not connected, poll instead)"
+        int "Ethernet chip INT GPIO (-1: not connected, poll instead)"
         default -1
 
     config BRIDGE_PIN_RST
-        int "W5500 RST GPIO (-1: not connected)"
+        int "Ethernet chip RST GPIO (-1: not connected)"
         default -1
 
     config BRIDGE_SPI_MHZ
-        int "W5500 SPI clock (MHz)"
+        int "Ethernet chip SPI clock (MHz)"
         range 1 80
         default 20
         help
             Rounded down to 80 MHz divided by an integer (40, 26, 20, ...).
-            Above 26 MHz the pins must be the SPI2 IO_MUX pins.
+            Above 26 MHz the pins must be the SPI2 IO_MUX pins. The W5100
+            is rated for 14 MHz.
 
     config BRIDGE_ETH_AUTONEGOTIATE
         bool "Autonegotiate Ethernet speed and duplex"
         default y
         help
             Turn off to force the link mode below, for boards whose W5500
-            can't hold the speed it negotiates.
+            can't hold the speed it negotiates. Not supported by the W5100.
 
     choice BRIDGE_ETH_SPEED
         prompt "Forced Ethernet speed"

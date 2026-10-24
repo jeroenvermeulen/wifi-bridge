@@ -1,5 +1,5 @@
 .pio/
-.vscode/
+.vscode/c_cpp_properties.json
 sdkconfig.*
 !sdkconfig.defaults
 src/wifi_credentials.h

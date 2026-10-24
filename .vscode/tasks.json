@@ -1,0 +1,79 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "-e", "${input:env}"],
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": {
+                "base": "$gcc",
+                "fileLocation": ["autoDetect", "${workspaceFolder}"]
+            }
+        },
+        {
+            "label": "Upload",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "-e", "${input:env}", "-t", "upload"],
+            "group": "build",
+            "problemMatcher": {
+                "base": "$gcc",
+                "fileLocation": ["autoDetect", "${workspaceFolder}"]
+            }
+        },
+        {
+            "label": "Upload and monitor",
+            "dependsOrder": "sequence",
+            "dependsOn": ["Upload", "Monitor"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "-e", "${input:env}", "-t", "clean"],
+            "problemMatcher": []
+        },
+        {
+            "label": "Menuconfig",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/pio",
+            "args": ["run", "-e", "${input:env}", "-t", "menuconfig"],
+            "presentation": { "focus": true },
+            "problemMatcher": []
+        },
+        {
+            // Reads the log without resetting the board, see tools/serial_log.py.
+            "label": "Monitor",
+            "type": "shell",
+            "command": "${userHome}/.platformio/penv/bin/python",
+            "args": ["tools/serial_log.py"],
+            "presentation": { "panel": "dedicated", "focus": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "Bridge traffic test",
+            "type": "shell",
+            "command": "tools/bridge_test.sh",
+            "args": ["${input:iface}"],
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "env",
+            "type": "pickString",
+            "description": "PlatformIO environment (board)",
+            "options": ["esp32-s3-poe", "lolin-s2-mini", "esp32-uno-shield"],
+            "default": "esp32-s3-poe"
+        },
+        {
+            "id": "iface",
+            "type": "promptString",
+            "description": "Mac interface wired to the bridge",
+            "default": "en20"
+        }
+    ]
+}

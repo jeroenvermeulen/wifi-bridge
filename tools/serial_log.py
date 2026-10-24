@@ -10,7 +10,13 @@ The ESP32-S2 console (TinyUSB, see src/usb_console.c) treats RTS released
 while DTR is held as esptool's "reboot into download mode", so on that port
 the lines are left as macOS sets them.
 
+Boards with a USB-serial chip (/dev/cu.usbserial*, e.g. esp32-uno-shield) DO
+reset when the port is opened: tried with DTR/RTS set before open, after open
+(RTS first) and untouched, it reset every time on macOS. Start the reader
+before a test and wait for "WiFi connected".
+
 Usage: python tools/serial_log.py [PORT] [SECONDS] [STOP_TEXT]
+PORT defaults to the first /dev/cu.usbmodem* or /dev/cu.usbserial* port.
 """
 import glob
 import sys
@@ -30,7 +36,7 @@ s = None
 while time.time() < end:
     try:
         if s is None:
-            port = want or (glob.glob("/dev/cu.usbmodem*") or [""])[0]
+            port = want or (glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*") or [""])[0]
             if not port:
                 time.sleep(0.3)
                 continue

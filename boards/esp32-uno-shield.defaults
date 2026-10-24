@@ -1,0 +1,15 @@
+# ESP32-WROOM-32U with an Arduino Uno Ethernet Shield (W5100) on wires.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+CONFIG_BRIDGE_ETH_W5100=y
+
+# W5100 wiring: the HSPI (SPI2) IO_MUX pins, CS on GPIO5. The shield's INT
+# (solder jumper to D2) and RST (Arduino reset) are not connected.
+CONFIG_BRIDGE_PIN_MOSI=13
+CONFIG_BRIDGE_PIN_MISO=12
+CONFIG_BRIDGE_PIN_SCLK=14
+CONFIG_BRIDGE_PIN_CS=5
+CONFIG_BRIDGE_PIN_INT=-1
+CONFIG_BRIDGE_PIN_RST=-1
+# The W5100's rated maximum; gives 13.3 MHz.
+CONFIG_BRIDGE_SPI_MHZ=14

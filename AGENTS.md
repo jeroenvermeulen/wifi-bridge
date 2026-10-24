@@ -7,16 +7,17 @@ from re-exploring the codebase and from re-learning the hardware the hard way.
 
 ESP-IDF firmware (built with PlatformIO) that bridges one wired device to a
 WiFi network. The ESP32 joins WiFi as a station with the wired device's MAC
-address (MAC cloning) and copies raw Ethernet frames between a W5500 (SPI
-Ethernet) and WiFi. The ESP has no IP address of its own. See
+address (MAC cloning) and copies raw Ethernet frames between a W5500 or W5100
+(SPI Ethernet) and WiFi. The ESP has no IP address of its own. See
 [README.md](README.md) for the user-facing description.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `src/main.c` | Everything bridge-related: MAC learning (NVS), RX callbacks, the two forwarding tasks, WiFi/Ethernet setup, stats log every 10 s |
+| `src/main.c` | Everything bridge-related: MAC learning (never stored), LAN guard, leaving WiFi when the device is gone, RX callbacks, the two forwarding tasks, WiFi/Ethernet setup, stats log every 10 s |
 | `src/w5500/w5500_mac.c` | Patched copy of the ESP-IDF 5.4.1 W5500 MAC driver (changes marked `wifi-bridge:`) |
+| `src/w5100/w5100.c` | Our own W5100 MAC + PHY driver (ESP-IDF has none); drives the SPI registers directly |
 | `src/usb_console.c` | TinyUSB CDC console for boards without USB-Serial/JTAG (ESP32-S2); no-op elsewhere |
 | `src/Kconfig.projbuild` | The bridge's board options (`CONFIG_BRIDGE_*`) |
 | `src/idf_component.yml` | Pulls `esp_tinyusb`, for the esp32s2 target only |
@@ -35,12 +36,14 @@ Generated, all gitignored: `sdkconfig.<env>`, `managed_components/`,
 |-----|----------|------|
 | `esp32-s3-poe` (default) | ESP32-S3 PoE W5500 N16R8 board | https://github.com/jeroenvermeulen/esp32-s3-poe-w5500-n16r8-dev-board |
 | `lolin-s2-mini` | LOLIN S2 Mini (ESP32-S2FN4R2) + USR-ES1 W5500 module on wires | https://github.com/jeroenvermeulen/esp32-w5500 |
+| `esp32-uno-shield` | ESP32-WROOM-32U + Arduino Uno Ethernet Shield (W5100) on wires | README "ESP32 + Arduino Ethernet Shield notes" |
 
 **Board differences belong in `boards/*.defaults`, never in `#if` blocks in
 the code.** The user explicitly asked for this. If a board needs a new knob,
 add a `CONFIG_BRIDGE_*` option to `Kconfig.projbuild` (with a neutral
 default) and set it in the board file. Feature checks on chip options (e.g.
-`CONFIG_TINYUSB_CDC_ENABLED`) are fine.
+`CONFIG_TINYUSB_CDC_ENABLED`, or `CONFIG_BRIDGE_ETH_W5100` for the Ethernet
+chip, which main.c checks once to pick the driver) are fine.
 
 ESP-IDF applies defaults only to a fresh config: after editing a defaults
 file, delete `sdkconfig.<env>` before building, or the change is silently
@@ -51,9 +54,10 @@ ignored.
 ```sh
 pio run -e esp32-s3-poe
 pio run -e lolin-s2-mini
+pio run -e esp32-uno-shield
 ```
 
-Build both environments after any change to shared code. The first configure
+Build all environments after any change to shared code. The first configure
 after switching envs can fail once (the shared `dependencies.lock` changes
 target); just run it again.
 
@@ -62,8 +66,17 @@ target); just run it again.
 The user lets agents flash and test. Typical setup on the user's Mac:
 
 - Board USB at `/dev/cu.usbmodem*`. S2 app port: `/dev/cu.usbmodem1234561`
-  (TinyUSB). S2 ROM download mode: `/dev/cu.usbmodem01`.
+  (TinyUSB). S2 ROM download mode: `/dev/cu.usbmodem01`. ESP32 (Uno shield):
+  `/dev/cu.usbserial-0001` (USB-serial chip with DTR/RTS auto-reset). Opening
+  it resets the board, whatever pyserial does with DTR/RTS, so start
+  `serial_log.py` first and wait for "WiFi connected" before a traffic test.
 - The bridge's RJ45 port is wired to the Mac's interface `en20`.
+  **Check `ifconfig en20 | grep status` says `active` before flashing bridge
+  firmware.** The bridge clones the first source MAC it hears. On 2026-10-24
+  the Uno shield's RJ45 turned out to be on the house LAN: it cloned the
+  router's MAC, joined WiFi with it and bridged LAN traffic for ~2 minutes
+  before it was erased. If the link isn't on `en20`, stop and ask the user.
+  (The LAN guard in main.c now blocks that case, but don't rely on it.)
 - Flash: `pio run -e <env> -t upload`.
 - Logs: `~/.platformio/penv/bin/python tools/serial_log.py [PORT] [SECONDS]`.
   Always pass SECONDS, and check `lsof /dev/cu.usbmodem*` first: two readers
@@ -110,6 +123,21 @@ LOLIN S2 Mini:
 - Stress test for USB/reset changes: 5× `pio run -e lolin-s2-mini -t upload`
   while running traffic through `en20`, once with a log reader open during
   the traffic.
+
+ESP32 + Arduino Uno Ethernet Shield (W5100):
+- ESP-IDF's default MISO timing (`input_delay_ns` 0) makes it sample half a
+  clock late, which on this shield shifted every byte read right by one bit
+  (RMSR reset value 0x55 read as 0x2a). The driver sets 40 ns. A 64 KB
+  write/read-back test passed at 25-70 ns and failed at 0-20 ns.
+- 13.3 MHz (rated 14) is used. 16 MHz read back clean, 20 MHz corrupted 7%
+  of bytes.
+- 3.5 us per byte (2.4 us of it is the 32-bit frame) with direct register
+  access, 4.0 us through the HAL buffer helpers. `-O2` on the driver gained
+  nothing more. The SPI bus must be non-DMA (main.c picks that for W5100).
+- No link status register: `eth=up` always. MACRAW receives every frame on
+  the wire (no MAC filter), but not its own transmissions (`echo 0`).
+- Measured 2026-10-24 through en20 at -43 dBm: ~220 KB/s down, 130-150 KB/s
+  up, ping 12 ms, no queue drops or TX errors.
 
 ## Conventions
 
