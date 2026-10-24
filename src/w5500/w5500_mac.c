@@ -9,10 +9,14 @@
  *    Upstream gives up after ~10 SPI reads, before a long frame has left a
  *    10 Mbit link; the next SEND then lands mid-frame and frames get lost
  *    (~35% of a TCP download). Overlapping the next frame's SPI copy with
- *    the previous frame's wire time was tried and loses frames again.
+ *    the previous frame's wire time was tried and loses frames again. A
+ *    SEND_OK seen after the deadline still counts as sent.
  *  - command register polling busy-waits briefly instead of sleeping 10 ms.
  *  - constructor renamed to bridge_eth_mac_new_w5500 to avoid clashing with
  *    the ESP-IDF copy.
+ *  - the setup is restored when the chip has reset itself, and received data
+ *    is dropped when a frame length shows the read pointer is out of step.
+ *  - when polling, the chip's INT output stays quiet.
  */
 #include <string.h>
 #include <stdlib.h>
@@ -75,6 +79,9 @@ typedef struct {
     uint8_t addr[6];
     bool packets_remain;
     uint8_t *rx_buffer;
+    // wifi-bridge: restored after a chip reset
+    bool promiscuous;
+    uint8_t phycfgr;
 } emac_w5500_t;
 
 static void *w5500_spi_init(const void *spi_config)
@@ -383,15 +390,51 @@ err:
     return ret;
 }
 
+// wifi-bridge: the chip can reset itself (on esp32-w5500: crosstalk from the
+// INT wire during uploads). It comes back with its link but with every
+// register at its default, socket 0 closed and out of MAC RAW mode: nothing is
+// received and every SEND times out, until a power cycle. Restore the setup
+// when socket 0 has lost its mode.
+static esp_err_t w5500_restore_after_reset(emac_w5500_t *emac)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t reg_value = 0;
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_MR(0), &reg_value, sizeof(reg_value)), err, TAG, "read SMR failed");
+    if (reg_value & W5500_SMR_MAC_RAW) {
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "chip has reset itself, restoring its setup");
+    ESP_GOTO_ON_ERROR(w5500_setup_default(emac), err, TAG, "w5500 default setup failed");
+    ESP_GOTO_ON_ERROR(w5500_set_mac_addr(emac), err, TAG, "set mac address failed");
+    reg_value = W5500_SMR_MAC_RAW | (emac->promiscuous ? 0 : W5500_SMR_MAC_FILTER);
+    ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_MR(0), &reg_value, sizeof(reg_value)), err, TAG, "write SMR failed");
+    // A link mode set by the PHY driver (e.g. forced 10 Mbit) takes a PHY reset to apply.
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_PHYCFGR, &reg_value, sizeof(reg_value)), err, TAG, "read PHYCFGR failed");
+    if (emac->phycfgr && (reg_value ^ emac->phycfgr) & W5500_PHYCFGR_MODE) {
+        reg_value = emac->phycfgr & ~W5500_PHYCFGR_RST;
+        ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_PHYCFGR, &reg_value, sizeof(reg_value)), err, TAG, "write PHYCFGR failed");
+        reg_value |= W5500_PHYCFGR_RST;
+        ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_PHYCFGR, &reg_value, sizeof(reg_value)), err, TAG, "write PHYCFGR failed");
+    }
+err:
+    return ret;
+}
+
 static esp_err_t emac_w5500_start(esp_eth_mac_t *mac)
 {
     esp_err_t ret = ESP_OK;
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     uint8_t reg_value = 0;
+    // wifi-bridge
+    ESP_GOTO_ON_ERROR(w5500_restore_after_reset(emac), err, TAG, "restore after reset failed");
     /* open SOCK0 */
     ESP_GOTO_ON_ERROR(w5500_send_command(emac, W5500_SCR_OPEN, 100), err, TAG, "issue OPEN command failed");
     /* enable interrupt for SOCK0 */
-    reg_value = W5500_SIMR_SOCK0;
+    // wifi-bridge: not when polling. Polling reads the socket IR, which the
+    // chip sets regardless. On esp32-w5500 with a blue W5500 module, the INT
+    // pin's edges, unused, reset the chip 3-8 times per 80 MB of uploads
+    // (crosstalk on the wires).
+    reg_value = emac->int_gpio_num >= 0 ? W5500_SIMR_SOCK0 : 0;
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SIMR, &reg_value, sizeof(reg_value)), err, TAG, "write SIMR failed");
 
 err:
@@ -431,6 +474,9 @@ static esp_err_t emac_w5500_write_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr,
     // The only PHY register is PHYCFGR
     ESP_GOTO_ON_FALSE(phy_reg == W5500_REG_PHYCFGR, ESP_FAIL, err, TAG, "wrong PHY register");
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_PHYCFGR, &reg_value, sizeof(uint8_t)), err, TAG, "write PHY register failed");
+    if (reg_value & W5500_PHYCFGR_RST) {
+        emac->phycfgr = reg_value;  // wifi-bridge
+    }
 
 err:
     return ret;
@@ -553,6 +599,7 @@ static esp_err_t emac_w5500_set_promiscuous(esp_eth_mac_t *mac, bool enable)
         smr |= W5500_SMR_MAC_FILTER;
     }
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_MR(0), &smr, sizeof(smr)), err, TAG, "write SMR failed");
+    emac->promiscuous = enable;  // wifi-bridge
 
 err:
     return ret;
@@ -610,9 +657,31 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     int64_t deadline = esp_timer_get_time() + wire_bytes * 8 / 10 * 2 + 1000;
     int retry = 0;
     uint8_t status = 0;
-    while (!(status & W5500_SIR_SEND)) {
+    for (;;) {
         ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_IR(0), &status, sizeof(status)), err, TAG, "read SOCK0 IR failed");
+        // wifi-bridge: check SEND before the deadline. A task preempted past
+        // the deadline (WiFi runs at a higher priority) otherwise failed a
+        // frame that had been sent and left SEND set, so the next frame
+        // returned before it was sent and the one after that was sent
+        // mid-frame. At 10 Mbit that closed the socket every few seconds
+        // during downloads.
+        if (status & W5500_SIR_SEND) {
+            break;
+        }
         if ((retry++ == 3 && !is_w5500_sane_for_rxtx(emac)) || esp_timer_get_time() > deadline) {
+            // wifi-bridge: a chip reset can come and go between two link checks,
+            // so esp_eth never calls start() again. Reopen the socket once the
+            // link is back. Only a closed socket, read twice: reopening an open
+            // one (after one bad SPI read of its status) put the RX pointers
+            // out of step.
+            uint8_t sr2 = 0xff, phycfgr = 0;
+            if (w5500_restore_after_reset(emac) == ESP_OK &&
+                    w5500_read(emac, W5500_REG_SOCK_SR(0), &status, sizeof(status)) == ESP_OK && status == W5500_SSR_CLOSED &&
+                    w5500_read(emac, W5500_REG_SOCK_SR(0), &sr2, sizeof(sr2)) == ESP_OK && sr2 == W5500_SSR_CLOSED &&
+                    w5500_read(emac, W5500_REG_PHYCFGR, &phycfgr, sizeof(phycfgr)) == ESP_OK && (phycfgr & W5500_PHYCFGR_LNK)) {
+                ESP_LOGW(TAG, "socket 0 is closed, reopening it");
+                mac->start(mac);
+            }
             return ESP_FAIL;
         }
     }
@@ -620,6 +689,19 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     status  = W5500_SIR_SEND;
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_IR(0), &status, sizeof(status)), err, TAG, "write SOCK0 IR failed");
 
+err:
+    return ret;
+}
+
+// wifi-bridge
+static esp_err_t w5500_drop_received(emac_w5500_t *emac)
+{
+    esp_err_t ret = ESP_OK;
+    uint16_t offset = 0;
+    emac->packets_remain = false;
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_RX_WR(0), &offset, sizeof(offset)), err, TAG, "read RX WR failed");
+    ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_RX_RD(0), &offset, sizeof(offset)), err, TAG, "write RX RD failed");
+    ESP_GOTO_ON_ERROR(w5500_send_command(emac, W5500_SCR_RECV, 100), err, TAG, "issue RECV command failed");
 err:
     return ret;
 }
@@ -641,10 +723,20 @@ static esp_err_t emac_w5500_alloc_recv_buf(emac_w5500_t *emac, uint8_t **buf, ui
         // read head
         ESP_GOTO_ON_ERROR(w5500_read_buffer(emac, &rx_len, sizeof(rx_len), offset), err, TAG, "read frame header failed");
         rx_len = __builtin_bswap16(rx_len) - 2; // data size includes 2 bytes of header
+        // wifi-bridge: a length the chip can't produce means the read pointer is
+        // out of step with the frames (seen with SPI errors and after reopening
+        // the socket), so every following "frame" is garbage too. Upstream
+        // returned an error here with packets_remain still set, and the RX task
+        // spun on it until the task watchdog fired. Drop all received data
+        // instead: the write pointer is always at a frame boundary.
+        if (rx_len < ETH_MIN_PACKET_SIZE - ETH_CRC_LEN || rx_len > ETH_MAX_PACKET_SIZE) {
+            ESP_LOGW(TAG, "invalid frame length %" PRIu16 ", dropping %" PRIu16 " received bytes", rx_len, remain_bytes);
+            rx_len = 0;
+            ESP_GOTO_ON_ERROR(w5500_drop_received(emac), err, TAG, "drop received data failed");
+            goto err;
+        }
         // frames larger than expected will be truncated
         copy_len = rx_len > *length ? *length : rx_len;
-        // runt frames are not forwarded by W5500 (tested on target), but check the length anyway since it could be corrupted at SPI bus
-        ESP_GOTO_ON_FALSE(copy_len >= ETH_MIN_PACKET_SIZE - ETH_CRC_LEN, ESP_ERR_INVALID_SIZE, err, TAG, "invalid frame length %" PRIu32, copy_len);
         *buf = malloc(copy_len);
         if (*buf != NULL) {
             emac_w5500_auto_buf_info_t *buff_info = (emac_w5500_auto_buf_info_t *)*buf;

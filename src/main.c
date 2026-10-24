@@ -56,6 +56,11 @@ void usb_console_init(void);  // no-op unless the board uses TinyUSB, see usb_co
 #define eth_phy_new esp_eth_phy_new_w5500
 #define ETH_SPI_DMA SPI_DMA_CH_AUTO
 #endif
+#if CONFIG_BRIDGE_SPI_HOST_SPI3
+#define ETH_SPI_HOST SPI3_HOST
+#else
+#define ETH_SPI_HOST SPI2_HOST
+#endif
 #define ETH_POLL_MS 1  // used when INT is not connected
 #if CONFIG_BRIDGE_ETH_SPEED_100M
 #define ETH_FORCED_SPEED ETH_SPEED_100M
@@ -115,7 +120,7 @@ static int64_t s_lan_seen_us;       // last time the LAN guard tripped, 0 = neve
 static int64_t s_eth_down_us;       // when the Ethernet link went down
 
 static struct {
-    uint32_t eth2wifi, wifi2eth, eth2wifi_qfull, eth2wifi_drop, wifi2eth_qfull, wifi2eth_txerr, echo, foreign_src;
+    uint32_t eth2wifi, wifi2eth, eth2wifi_qfull, eth2wifi_drop, eth2wifi_badsum, wifi2eth_qfull, wifi2eth_txerr, echo, foreign_src;
     uint32_t tx_slow;
     int64_t tx_us_total, tx_us_max;
 } s_stats;
@@ -223,11 +228,62 @@ static esp_err_t eth_rx(esp_eth_handle_t eth, uint8_t *buffer, uint32_t len, voi
     return ESP_OK;
 }
 
+static uint32_t csum_add(uint32_t sum, const uint8_t *p, uint32_t n)
+{
+    for (; n > 1; n -= 2, p += 2) sum += (p[0] << 8) | p[1];
+    if (n) sum += p[0] << 8;
+    return sum;
+}
+
+static uint16_t csum_fold(uint32_t sum)
+{
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return sum;
+}
+
+// The W5500 occasionally hands over a frame that is corrupted although it was
+// fine on the wire: on esp32-w5500 at 100 Mbit about 1 in 60000, with both a
+// blue module and a USR-ES1. Some reached the server and failed uploads with
+// a TLS "bad record mac". Checks the IPv4 header and TCP/UDP checksums, which
+// the wired device's network card filled in; ~20 us per full frame.
+static bool checksums_ok(const uint8_t *b, uint32_t len)
+{
+    const uint8_t *l4;
+    uint32_t l4_len, sum;
+    uint8_t proto;
+    if (len >= 34 && b[12] == 0x08 && b[13] == 0x00) {
+        uint32_t ihl = (b[14] & 0x0f) * 4, total = (b[16] << 8) | b[17];
+        if (ihl < 20 || total < ihl || 14 + total > len) return true;
+        if (csum_fold(csum_add(0, b + 14, ihl)) != 0xffff) return false;
+        if ((b[20] & 0x3f) || b[21]) return true;  // fragment: the L4 checksum spans all fragments
+        proto = b[23];
+        l4 = b + 14 + ihl;
+        l4_len = total - ihl;
+        sum = csum_add(0, b + 26, 8);
+    } else if (len >= 54 && b[12] == 0x86 && b[13] == 0xdd) {
+        proto = b[20];  // extension headers are not followed
+        l4 = b + 54;
+        l4_len = (b[18] << 8) | b[19];
+        if (54 + l4_len > len) return true;
+        sum = csum_add(0, b + 22, 32);
+    } else {
+        return true;
+    }
+    if ((proto != 6 || l4_len < 20) && (proto != 17 || l4_len < 8)) return true;
+    if (proto == 17 && !l4[6] && !l4[7]) return true;  // UDP without checksum
+    return csum_fold(csum_add(sum + proto + l4_len, l4, l4_len)) == 0xffff;
+}
+
 static void eth2wifi_task(void *arg)
 {
     frame_t f;
     for (;;) {
         xQueueReceive(s_eth2wifi_q, &f, portMAX_DELAY);
+        if (!checksums_ok(f.buf, f.len)) {
+            s_stats.eth2wifi_badsum++;
+            free(f.buf);
+            continue;
+        }
         esp_err_t err = ESP_FAIL;
         for (int tries = 0; s_wifi_up && tries < 5; tries++) {
             err = esp_wifi_internal_tx(WIFI_IF_STA, f.buf, f.len);
@@ -443,9 +499,9 @@ static void stats_task(void *arg)
                      ap.phy_11b ? "b" : "", ap.phy_11g ? "g" : "", ap.phy_11n ? "n" : "");
             if (ap.rssi < ROAM_RSSI && n % ROAM_CHECK_STATS == 0) maybe_roam(&ap);
         }
-        ESP_LOGI(TAG, "wifi=%s eth=%s | eth->wifi %lu (qfull %lu, txerr %lu) | wifi->eth %lu (qfull %lu, txerr %lu) | echo %lu other-src %lu",
+        ESP_LOGI(TAG, "wifi=%s eth=%s | eth->wifi %lu (qfull %lu, txerr %lu, badsum %lu) | wifi->eth %lu (qfull %lu, txerr %lu) | echo %lu other-src %lu",
                  s_wifi_up ? "up" : "down", s_eth_up ? "up" : "down",
-                 s_stats.eth2wifi, s_stats.eth2wifi_qfull, s_stats.eth2wifi_drop, s_stats.wifi2eth, s_stats.wifi2eth_qfull,
+                 s_stats.eth2wifi, s_stats.eth2wifi_qfull, s_stats.eth2wifi_drop, s_stats.eth2wifi_badsum, s_stats.wifi2eth, s_stats.wifi2eth_qfull,
                  s_stats.wifi2eth_txerr, s_stats.echo, s_stats.foreign_src);
         ESP_LOGI(TAG, "internal heap free %u (min %u) | eth tx: avg %lld us, max %lld us, >5ms %lu",
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), s_stats.wifi2eth ? s_stats.tx_us_total / s_stats.wifi2eth : 0,
@@ -466,7 +522,7 @@ static bool eth_init(void)
         .quadhd_io_num = -1,
     };
     if (!bus_ready) {
-        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, ETH_SPI_DMA));
+        ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &bus, ETH_SPI_DMA));
         ESP_ERROR_CHECK(gpio_install_isr_service(0));
         bus_ready = true;
     }
@@ -477,7 +533,7 @@ static bool eth_init(void)
         .queue_size = 20,
         .spics_io_num = CONFIG_BRIDGE_PIN_CS,
     };
-    eth_w5500_config_t chip = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &dev);  // the W5100 driver takes the same
+    eth_w5500_config_t chip = ETH_W5500_DEFAULT_CONFIG(ETH_SPI_HOST, &dev);  // the W5100 driver takes the same
     chip.int_gpio_num = CONFIG_BRIDGE_PIN_INT;
     if (chip.int_gpio_num < 0) chip.poll_period_ms = ETH_POLL_MS;
 

@@ -14,6 +14,7 @@ Supported boards, one PlatformIO environment each:
 | `esp32-s3-poe` (default) | AliExpress "ESP32-S3 PoE W5500 N16R8" development board | [esp32-s3-poe-w5500-n16r8-dev-board](https://github.com/jeroenvermeulen/esp32-s3-poe-w5500-n16r8-dev-board) |
 | `lolin-s2-mini` | WEMOS LOLIN S2 Mini wired to a W5500 module (USR-ES1) | [esp32-w5500](https://github.com/jeroenvermeulen/esp32-w5500) |
 | `esp32-uno-shield` | ESP32-WROOM-32U wired to an Arduino Uno Ethernet Shield (W5100) | [below](#esp32--arduino-ethernet-shield-notes) |
+| `esp32-w5500` | ESP32-WROOM-32U wired to a W5500 module (USR-ES1) | [below](#esp32--w5500-module-notes) |
 
 ## How it works
 
@@ -28,6 +29,9 @@ Supported boards, one PlatformIO environment each:
   uploads.
 - Raw Ethernet frames are copied unchanged between the Ethernet chip and WiFi. The ESP32 has no IP
   address of its own.
+- Frames from the wired device are dropped if their IPv4 header or TCP/UDP checksum is wrong, so
+  TCP resends them. The W5500 occasionally delivers a frame that was corrupted after the wire
+  (see the [esp32-w5500 notes](#esp32--w5500-module-notes)), and some of those reached servers.
 - If a different device is plugged in, the bridge switches to its MAC once the old device has
   been silent for 10 seconds.
 - It leaves WiFi when the device has been silent for 15 minutes, or the Ethernet link has been
@@ -42,16 +46,19 @@ Supported boards, one PlatformIO environment each:
 
 Measured through a Realtek USB 2.5G adapter on a Mac, to the internet over WiFi (-55 to -61 dBm):
 
-| | `esp32-s3-poe` | `lolin-s2-mini` | `esp32-uno-shield` |
-|---|---|---|---|
-| Ethernet link | 10 Mbit full (forced) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
-| Download (WiFi → Ethernet) | ~700 KB/s | ~880 KB/s | ~220 KB/s |
-| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~560 KB/s | ~130-150 KB/s |
-| Ping to the router | ~7 ms average, 0% loss | ~10 ms average, 0% loss | ~12 ms average, 0% loss |
+| | `esp32-s3-poe` | `lolin-s2-mini` | `esp32-uno-shield` | `esp32-w5500` |
+|---|---|---|---|---|
+| Ethernet link | 10 Mbit full (forced) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
+| Download (WiFi → Ethernet) | ~700 KB/s | ~880 KB/s | ~220 KB/s | ~1.4 MB/s |
+| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~560 KB/s | ~130-150 KB/s | ~570 KB/s (~820 KB/s for 5 MB) |
+| Ping to the router | ~7 ms average, 0% loss | ~10 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
 
 The W5500 on the S3 board can't hold 100 Mbit, so its link is forced to 10 Mbit. The W5500
 module on the S2 Mini runs at 100 Mbit. There the limit is WiFi: the S2 Mini only transmits
 reliably at reduced power (see below).
+
+On `esp32-w5500` (WiFi at -37 to -44 dBm) the 3 MB upload of the test is mostly TCP ramp-up;
+5 MB uploads average ~820 KB/s. Eight parallel uploads share ~0.9 MB/s evenly.
 
 On `esp32-uno-shield` (WiFi at -43 dBm) the W5100's SPI is the limit: it moves one byte per
 3.5 µs, about 280 KB/s at best, and a full-size frame takes ~5 ms each way.
@@ -66,6 +73,7 @@ On `esp32-uno-shield` (WiFi at -43 dBm) the W5100's SPI is the limit: it moves o
    pio run -e esp32-s3-poe -t upload
    pio run -e lolin-s2-mini -t upload
    pio run -e esp32-uno-shield -t upload
+   pio run -e esp32-w5500 -t upload
    ```
    - ESP32-S3 PoE board: use the **ESP-USB** port with a **USB-A to USB-C** cable (USB-C to
      USB-C gives no power on this board), and switch it on.
@@ -85,9 +93,10 @@ top of [sdkconfig.defaults](sdkconfig.defaults). The bridge's own options are de
 |---|---|
 | `CONFIG_BRIDGE_ETH_W5500` / `_W5100` | Ethernet chip. |
 | `CONFIG_BRIDGE_PIN_MOSI`, `_MISO`, `_SCLK`, `_CS` | SPI wiring. |
-| `CONFIG_BRIDGE_PIN_INT` | Chip interrupt; `-1` polls instead. |
+| `CONFIG_BRIDGE_PIN_INT` | Chip interrupt; `-1` polls instead, and keeps the W5500's INT output quiet. |
 | `CONFIG_BRIDGE_PIN_RST` | Chip reset; `-1` if not connected. |
-| `CONFIG_BRIDGE_SPI_MHZ` | SPI clock. Above 26 MHz the pins must be the SPI2 IO_MUX pins. The W5100 is rated for 14 MHz. |
+| `CONFIG_BRIDGE_SPI_HOST_SPI2` / `_SPI3` | SPI host. SPI2 unless set; the ESP32's VSPI is SPI3. |
+| `CONFIG_BRIDGE_SPI_MHZ` | SPI clock. Above 26 MHz the pins must be the IO_MUX pins of that SPI host. The W5100 is rated for 14 MHz. |
 | `CONFIG_BRIDGE_ETH_AUTONEGOTIATE` | `n` forces the link mode below. W5500 only. |
 | `CONFIG_BRIDGE_ETH_SPEED_10M` / `_100M` | Forced speed. |
 | `CONFIG_BRIDGE_ETH_DUPLEX_HALF` / `_FULL` | Forced duplex. Must match the wired device: an autonegotiating device falls back to half duplex against a forced link, some (e.g. Realtek USB 2.5G adapters) only do full. A mismatch shows up as slow WiFi → Ethernet throughput. |
@@ -129,6 +138,39 @@ Opening that port resets the board, also with `tools/serial_log.py`.
 - 16 MHz still read back correctly, 20 MHz corrupted 7% of bytes. The board stays at the W5100's
   rated 14 MHz (13.3 MHz in practice).
 
+### ESP32 + W5500 module notes
+
+Wiring: the VSPI pins, so SPI runs at 40 MHz. The HSPI pins would put MISO on GPIO12, which
+selects 1.8 V flash when it is high at reset. The console is the board's USB-serial chip, as on
+the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 module was used first.
+
+| W5500 | SCLK | MOSI | MISO | CS | RST | INT |
+|---|---|---|---|---|---|---|
+| ESP32 GPIO | 18 | 23 | 19 | 5 | 21 | 22 |
+
+- **The INT wire can reset the W5500.** With the blue module, the W5500 reset itself 3 to 8
+  times per 80 MB of uploads: every register back at its default and the link down for 2
+  seconds. That kept happening when the firmware polled and ignored INT, and stopped when the
+  chip's INT output was kept quiet: INT's edges coupled into the other wires, probably RST. The
+  USR-ES1 had no resets in 80 MB with INT on. If a module does reset, set
+  `CONFIG_BRIDGE_PIN_INT=-1`: the bridge then polls every 1 ms at the same throughput and keeps
+  INT quiet.
+- **Don't force 10 Mbit with the Mac's USB adapter.** At forced 10 Mbit full, ~80% of the frames
+  from the bridge to the Mac were lost while the Mac was also sending, so parallel uploads (as
+  speedtest.net does) stalled and reset. At forced half duplex the W5500 closed its socket over
+  and over. With autonegotiation nothing was lost.
+- **Corrupted frames**: at 100 Mbit about 1 in 60000 frames from the wired device came out of
+  the W5500 with a wrong TCP checksum, with both modules. The frames were fine on the wire
+  (the Mac's adapter computes the checksums), and reading a known pattern from the W5500 during
+  the same traffic gave no SPI errors. So the W5500 stores them corrupted. Some passed the
+  network unchecked and failed uploads with a TLS "bad record mac" error (1 or 2 of every 16
+  uploads of 5 MB). The bridge now drops them: 48 uploads, no errors.
+- The SPI itself is clean: 600 MB read back without an error at 40 MHz with WiFi off, also with
+  frame-sized lengths.
+- The driver recovers if the W5500 resets or its socket closes (see
+  [below](#w5500-driver-patch)), so the bridge comes back after ~2 seconds instead of needing a
+  power cycle.
+
 ## Monitoring
 
 The bridge logs over USB serial every 10 seconds: link states, signal strength, frame counters
@@ -149,6 +191,20 @@ driver. Upstream stops waiting for "send complete" after about 10 SPI reads, whi
 full-size frame has left a 10 Mbit wire. The next frame is then started mid-transmission and
 lost, which cost about 35% of downloaded frames. The patched driver waits for as long as the frame
 needs on the wire. It also polls the command register instead of sleeping 10 ms.
+
+Other changes:
+
+- A "send complete" that arrives after the wait deadline counts as sent. Before, a bridge task
+  preempted past the deadline reported the frame as failed and left the flag set for the next
+  frame, which then started the frame after it mid-transmission. At 10 Mbit that closed the
+  socket every few seconds during downloads.
+- If the W5500 resets itself, the driver restores its setup when the link comes back, or on the
+  next failed send when the reset was too short for esp_eth to notice the link drop. Before,
+  the chip stayed silent until a power cycle.
+- A received frame length the chip can't produce means the read pointer is out of step with the
+  frames. The driver then drops all received data and continues at the next frame. Upstream
+  returned an error and its receive task spun on it until the watchdog fired.
+- When polling (no INT pin), the chip's INT output stays quiet.
 
 ## W5100 driver
 

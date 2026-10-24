@@ -15,7 +15,7 @@ address (MAC cloning) and copies raw Ethernet frames between a W5500 or W5100
 
 | Path | Purpose |
 |------|---------|
-| `src/main.c` | Everything bridge-related: MAC learning (never stored), LAN guard, leaving WiFi when the device is gone, RX callbacks, the two forwarding tasks, WiFi/Ethernet setup, stats log every 10 s |
+| `src/main.c` | Everything bridge-related: MAC learning (never stored), LAN guard, leaving WiFi when the device is gone, RX callbacks, the two forwarding tasks (eth->wifi drops frames with bad IPv4/TCP/UDP checksums), WiFi/Ethernet setup, stats log every 10 s |
 | `src/w5500/w5500_mac.c` | Patched copy of the ESP-IDF 5.4.1 W5500 MAC driver (changes marked `wifi-bridge:`) |
 | `src/w5100/w5100.c` | Our own W5100 MAC + PHY driver (ESP-IDF has none); drives the SPI registers directly |
 | `src/usb_console.c` | TinyUSB CDC console for boards without USB-Serial/JTAG (ESP32-S2); no-op elsewhere |
@@ -37,6 +37,7 @@ Generated, all gitignored: `sdkconfig.<env>`, `managed_components/`,
 | `esp32-s3-poe` (default) | ESP32-S3 PoE W5500 N16R8 board | https://github.com/jeroenvermeulen/esp32-s3-poe-w5500-n16r8-dev-board |
 | `lolin-s2-mini` | LOLIN S2 Mini (ESP32-S2FN4R2) + USR-ES1 W5500 module on wires | https://github.com/jeroenvermeulen/esp32-w5500 |
 | `esp32-uno-shield` | ESP32-WROOM-32U + Arduino Uno Ethernet Shield (W5100) on wires | README "ESP32 + Arduino Ethernet Shield notes" |
+| `esp32-w5500` | ESP32-WROOM-32U + USR-ES1 W5500 module on wires (the user's permanent bridge) | README "ESP32 + W5500 module notes" |
 
 **Board differences belong in `boards/*.defaults`, never in `#if` blocks in
 the code.** The user explicitly asked for this. If a board needs a new knob,
@@ -55,6 +56,7 @@ ignored.
 pio run -e esp32-s3-poe
 pio run -e lolin-s2-mini
 pio run -e esp32-uno-shield
+pio run -e esp32-w5500
 ```
 
 Build all environments after any change to shared code. The first configure
@@ -66,7 +68,7 @@ target); just run it again.
 The user lets agents flash and test. Typical setup on the user's Mac:
 
 - Board USB at `/dev/cu.usbmodem*`. S2 app port: `/dev/cu.usbmodem1234561`
-  (TinyUSB). S2 ROM download mode: `/dev/cu.usbmodem01`. ESP32 (Uno shield):
+  (TinyUSB). S2 ROM download mode: `/dev/cu.usbmodem01`. ESP32 (Uno shield, W5500):
   `/dev/cu.usbserial-0001` (USB-serial chip with DTR/RTS auto-reset). Opening
   it resets the board, whatever pyserial does with DTR/RTS, so start
   `serial_log.py` first and wait for "WiFi connected" before a traffic test.
@@ -87,6 +89,12 @@ The user lets agents flash and test. Typical setup on the user's Mac:
   regression (~70 KB/s, uploads stalled).
   `pio device monitor` and plain serial tools may reset the board.
 - Traffic test: `sh tools/bridge_test.sh en20` (ping, 5 MB down, 3 MB up).
+  It is too short to catch faults that happen once per 10-20 MB: on
+  esp32-w5500 several "clean" runs turned out to be luck. For a verdict,
+  run 16 uploads of 5 MB (`head -c 5000000 /dev/urandom | curl --interface
+  en20 --data-binary @- https://speed.cloudflare.com/__up`) and 16
+  downloads, then count curl failures (also TLS "bad record mac") and the
+  W5500 driver's warnings in the log.
 - Link state: `ifconfig en20 | grep media`.
 
 Wrap long-running commands in `timeout`; a hung esptool otherwise blocks for
@@ -138,6 +146,36 @@ ESP32 + Arduino Uno Ethernet Shield (W5100):
   the wire (no MAC filter), but not its own transmissions (`echo 0`).
 - Measured 2026-10-24 through en20 at -43 dBm: ~220 KB/s down, 130-150 KB/s
   up, ping 12 ms, no queue drops or TX errors.
+
+ESP32 + W5500 module (esp32-w5500), first a blue AliExpress module, now a USR-ES1:
+- Blue module: the INT wire's edges reset the W5500 (3-8 times per 80 MB of
+  uploads), also with the firmware polling and ignoring INT. Keeping the
+  chip's INT output quiet (the driver does that when
+  `CONFIG_BRIDGE_PIN_INT=-1`) stopped it: 0 resets in 160 MB. Ruled out
+  first: SPI clock (20/26/40 MHz all failed), GPIO drive strength, WiFi TX
+  power (5 and 13 dBm both failed). The USR-ES1 runs with INT: 0 resets.
+- Forced 10 Mbit full: ~80% of frames from the bridge to the Mac's adapter
+  were lost under two-way traffic (compare `netstat -I en20` Ipkts with the
+  bridge's wifi->eth count), so speedtest.net's parallel uploads stalled.
+  Single streams hid it. Forced half duplex: the W5500 closed its socket in
+  a loop (218 reopens) and the bridge stopped forwarding. The S3 board is
+  forced to 10 Mbit full too; it may have the same loss with this adapter
+  (untested).
+- At 100 Mbit about 1 in 60000 frames from the Mac leaves the W5500 with a
+  bad TCP checksum (both modules). Located by checking checksums in the
+  bridge plus a task that read a known pattern from the W5500's socket 1
+  TX buffer during the same traffic: ~500000 reads, no errors except one
+  bit at WiFi startup. Long static read tests (600 MB, any length) were
+  clean. Some bad frames reached Cloudflare unchecked and failed uploads
+  with a TLS "bad record mac". The checksum check in eth2wifi_task fixes
+  that: 48 uploads of 5 MB, no failures, `badsum` counts the drops.
+- The W5500 driver's transmit wait used to fail frames that completed after
+  the deadline (bridge task preempted by WiFi). That left SEND_OK set and
+  closed the socket every few seconds during 10 Mbit downloads. Fixed for
+  all W5500 boards; the S3 board wasn't retested.
+- Measured 2026-10-24 with the USR-ES1 through en20 at -37 to -44 dBm:
+  ~1.4 MB/s down, ~820 KB/s up (5 MB; ~570 KB/s in bridge_test's 3 MB),
+  ping ~8 ms, 8 parallel uploads ~0.9 MB/s shared evenly with 0% ping loss.
 
 ## Conventions
 

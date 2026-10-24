@@ -1,0 +1,24 @@
+# ESP32-WROOM-32U with a W5500 module on wires: a USR-ES1, earlier a blue
+# AliExpress module.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# W5500 wiring: the VSPI (SPI3) IO_MUX pins, so SPI can run at 40 MHz. The
+# HSPI IO_MUX pins would put MISO on GPIO12, which selects 1.8 V flash if it
+# is high at reset, and CS on strapping pin GPIO15.
+CONFIG_BRIDGE_SPI_HOST_SPI3=y
+CONFIG_BRIDGE_PIN_MOSI=23
+CONFIG_BRIDGE_PIN_MISO=19
+CONFIG_BRIDGE_PIN_SCLK=18
+CONFIG_BRIDGE_PIN_CS=5
+CONFIG_BRIDGE_PIN_RST=21
+CONFIG_BRIDGE_SPI_MHZ=40
+
+# With the blue module's wiring, INT's edges reset the W5500 3-8 times per
+# 80 MB of uploads (crosstalk); that board needed -1 here. The USR-ES1: no
+# resets in 80 MB.
+CONFIG_BRIDGE_PIN_INT=22
+
+# Forced 10 Mbit full lost ~80% of the frames to the Mac's USB adapter under
+# traffic in both directions (8 parallel uploads stalled), and half duplex
+# made the W5500 close its socket over and over.
+CONFIG_BRIDGE_ETH_AUTONEGOTIATE=y

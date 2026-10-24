@@ -17,6 +17,19 @@ menu "WiFi bridge board"
                 BRIDGE_ETH_AUTONEGOTIATE on.
     endchoice
 
+    choice BRIDGE_SPI_HOST
+        prompt "Ethernet chip SPI host"
+        default BRIDGE_SPI_HOST_SPI2
+        help
+            Pick the host whose IO_MUX pins the chip is wired to: other pins go
+            through the GPIO matrix, which limits the clock (see below).
+
+        config BRIDGE_SPI_HOST_SPI2
+            bool "SPI2 (HSPI on the ESP32, FSPI on the S2/S3)"
+        config BRIDGE_SPI_HOST_SPI3
+            bool "SPI3 (VSPI on the ESP32)"
+    endchoice
+
     config BRIDGE_PIN_MOSI
         int "Ethernet chip MOSI GPIO"
         default -1
@@ -47,8 +60,8 @@ menu "WiFi bridge board"
         default 20
         help
             Rounded down to 80 MHz divided by an integer (40, 26, 20, ...).
-            Above 26 MHz the pins must be the SPI2 IO_MUX pins. The W5100
-            is rated for 14 MHz.
+            Above 26 MHz the pins must be the IO_MUX pins of the selected
+            SPI host. The W5100 is rated for 14 MHz.
 
     config BRIDGE_ETH_AUTONEGOTIATE
         bool "Autonegotiate Ethernet speed and duplex"

@@ -59,6 +59,12 @@
 
 #define W5500_SIMR_SOCK0 (1<<0) // Socket 0 interrupt
 
+// wifi-bridge
+#define W5500_PHYCFGR_RST  (1<<7) // PHY reset when 0
+#define W5500_PHYCFGR_MODE (0x78) // OPMD and OPMDC: link mode
+#define W5500_PHYCFGR_LNK  (1<<0) // Link up
+#define W5500_SSR_CLOSED   (0x00)   // Socket status: closed
+
 #define W5500_SMR_MAC_RAW    (1<<2) // MAC RAW mode
 #define W5500_SMR_MAC_FILTER (1<<7) // MAC filter
 
