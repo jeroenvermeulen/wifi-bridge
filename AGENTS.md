@@ -111,6 +111,12 @@ ESP32-S3 PoE board:
 - Needs a USB-A to USB-C cable; RST has a pull-down that the driver releases.
 
 LOLIN S2 Mini:
+- Single core: the bridge tasks get preempted for up to ~50 ms (WiFi,
+  TinyUSB at 20), so waits must not assume they run on time (see the W5500
+  transmit deadline fix). A few SPI lock timeouts (50 ms) per 80 MB remain,
+  each costing one frame. Measured 2026-10-24 at -44 dBm: ~840 KB/s down,
+  ~625 KB/s up (3 MB; ~645 KB/s for 5 MB), ping ~5.5 ms, 8 parallel uploads
+  ~0.8 MB/s with no frames lost toward the Mac.
 - **WiFi TX power must stay capped** (`CONFIG_BRIDGE_WIFI_MAX_TX_POWER=34`,
   8.5 dBm). At full power, uploads drop to ~75 KB/s and the USB console dies
   under traffic. That is probably supply dips on the board's small regulator,
@@ -161,8 +167,9 @@ ESP32 + W5500 module (esp32-w5500), first a blue AliExpress module, now a USR-ES
 - Forced 10 Mbit full: ~80% of frames from the bridge to the Mac's adapter
   were lost under two-way traffic (compare `netstat -I en20` Ipkts with the
   bridge's wifi->eth count), so speedtest.net's parallel uploads stalled.
-  Single streams hid it. Forced half duplex: the W5500 closed its socket in
-  a loop (218 reopens) and the bridge stopped forwarding. The S3 board had
+  Single streams hid it. Forced half duplex (retested on the S2 after the
+  Sn_SR fix below): works, but 11% ping loss under load and many sends
+  counted failed that the Mac did receive (late, after deferring). The S3 board had
   the same loss (~86%) at forced 10 Mbit full; it now autonegotiates (see
   below). Likely the adapter falls back to half duplex against a forced link
   while macOS keeps showing full-duplex: losses are only toward the Mac and
@@ -176,9 +183,14 @@ ESP32 + W5500 module (esp32-w5500), first a blue AliExpress module, now a USR-ES
   with a TLS "bad record mac". The checksum check in eth2wifi_task fixes
   that: 48 uploads of 5 MB, no failures, `badsum` counts the drops.
 - The W5500 driver's transmit wait used to fail frames that completed after
-  the deadline (bridge task preempted by WiFi). That left SEND_OK set and
-  closed the socket every few seconds during 10 Mbit downloads. Fixed for
-  all W5500 boards; the S3 board wasn't retested.
+  the deadline (bridge task preempted by WiFi). That left SEND_OK set, so a
+  later frame was sent mid-frame. Fixed for all W5500 boards.
+- **`W5500_REG_SOCK_SR` was 0x0004 (Sn_PORT0) in ESP-IDF's header; Sn_SR is
+  0x0003.** The recovery code read it as "closed" after every failed send
+  and reopened a working socket, which desynced RX ("invalid frame length").
+  Every "socket closed" seen before the fix (10 Mbit downloads, half duplex,
+  70 per 16 downloads on the S2) was this. Found by logging Sn_IR next to
+  Sn_SR: SEND_OK set on a "closed" socket.
 - Measured 2026-10-24 with the USR-ES1 through en20 at -37 to -44 dBm:
   ~1.4 MB/s down, ~820 KB/s up (5 MB; ~570 KB/s in bridge_test's 3 MB),
   ping ~8 ms, 8 parallel uploads ~0.9 MB/s shared evenly with 0% ping loss.

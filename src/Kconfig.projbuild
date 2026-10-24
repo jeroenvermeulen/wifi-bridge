@@ -54,6 +54,20 @@ menu "WiFi bridge board"
         int "Ethernet chip RST GPIO (-1: not connected)"
         default -1
 
+    config BRIDGE_PIN_LED_TX
+        int "TX LED GPIO (-1: none)"
+        default -1
+        help
+            Lights while frames go out the Ethernet port (WiFi -> wired
+            device). Active high: GPIO -> resistor -> LED -> GND.
+
+    config BRIDGE_PIN_LED_RX
+        int "RX LED GPIO (-1: none)"
+        default -1
+        help
+            Lights while frames come in from the Ethernet port (wired
+            device -> WiFi). Active high: GPIO -> resistor -> LED -> GND.
+
     config BRIDGE_SPI_MHZ
         int "Ethernet chip SPI clock (MHz)"
         range 1 80

@@ -49,13 +49,13 @@ Measured through a Realtek USB 2.5G adapter on a Mac, to the internet over WiFi 
 | | `esp32-s3-poe` | `lolin-s2-mini` | `esp32-uno-shield` | `esp32-w5500` |
 |---|---|---|---|---|
 | Ethernet link | 10 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
-| Download (WiFi → Ethernet) | ~700 KB/s | ~880 KB/s | ~220 KB/s | ~1.4 MB/s |
-| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~560 KB/s | ~130-150 KB/s | ~570 KB/s (~820 KB/s for 5 MB) |
-| Ping to the router | ~8-20 ms average, 0% loss | ~10 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
+| Download (WiFi → Ethernet) | ~700 KB/s | ~840 KB/s | ~220 KB/s | ~1.4 MB/s |
+| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~625 KB/s | ~130-150 KB/s | ~570 KB/s (~820 KB/s for 5 MB) |
+| Ping to the router | ~8-20 ms average, 0% loss | ~5.5 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
 
 The W5500 on the S3 board can't hold 100 Mbit. It autonegotiates, and the link flaps for ~15 s
 until the Mac's adapter settles on 10 Mbit (S3 measured 2026-10-24 at -63 dBm). The W5500
-module on the S2 Mini runs at 100 Mbit. There the limit is WiFi: the S2 Mini only transmits
+module on the S2 Mini runs at 100 Mbit (measured 2026-10-24 at -44 dBm). There the limit is WiFi: the S2 Mini only transmits
 reliably at reduced power (see below).
 
 On `esp32-w5500` (WiFi at -37 to -44 dBm) the 3 MB upload of the test is mostly TCP ramp-up;
@@ -100,7 +100,7 @@ top of [sdkconfig.defaults](sdkconfig.defaults). The bridge's own options are de
 | `CONFIG_BRIDGE_SPI_MHZ` | SPI clock. Above 26 MHz the pins must be the IO_MUX pins of that SPI host. The W5100 is rated for 14 MHz. |
 | `CONFIG_BRIDGE_ETH_AUTONEGOTIATE` | `n` forces the link mode below. W5500 only. |
 | `CONFIG_BRIDGE_ETH_SPEED_10M` / `_100M` | Forced speed. |
-| `CONFIG_BRIDGE_ETH_DUPLEX_HALF` / `_FULL` | Forced duplex. Must match the wired device: an autonegotiating device falls back to half duplex against a forced link. The Mac's USB adapter did, although macOS showed full duplex: forced full lost ~80% of the frames to it under two-way traffic, while single transfers looked fine. Forced half made the W5500 close its socket over and over. Prefer autonegotiation. |
+| `CONFIG_BRIDGE_ETH_DUPLEX_HALF` / `_FULL` | Forced duplex. Must match the wired device: an autonegotiating device falls back to half duplex against a forced link. The Mac's USB adapter did, although macOS showed full duplex: forced full lost ~80% of the frames to it under two-way traffic, while single transfers looked fine. Forced half works, but sends often wait out the Mac's traffic (11% ping loss under load). Prefer autonegotiation. |
 | `CONFIG_BRIDGE_WIFI_MAX_TX_POWER` | In 0.25 dBm units, `0` for the chip default. |
 
 ESP-IDF only applies defaults to a new configuration, so after editing a defaults file delete
@@ -147,7 +147,9 @@ the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 mo
 
 | W5500 | SCLK | MOSI | MISO | CS | RST | INT |
 |---|---|---|---|---|---|---|
-| ESP32 GPIO | 18 | 23 | 19 | 5 | 21 | 22 |
+| ESP32 GPIO | 18 | 23 | 19 | 5 | 17 | 16 |
+
+RST and INT stay off GPIO21/22 to keep the ESP32's usual I2C pins free.
 
 - **The INT wire can reset the W5500.** With the blue module, the W5500 reset itself 3 to 8
   times per 80 MB of uploads: every register back at its default and the link down for 2
@@ -158,8 +160,8 @@ the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 mo
   INT quiet.
 - **Don't force 10 Mbit with the Mac's USB adapter.** At forced 10 Mbit full, ~80% of the frames
   from the bridge to the Mac were lost while the Mac was also sending, so parallel uploads (as
-  speedtest.net does) stalled and reset. At forced half duplex the W5500 closed its socket over
-  and over. With autonegotiation nothing was lost. The S3 board had the same loss (~86%) until
+  speedtest.net does) stalled and reset. Forced half duplex works but loses 11% of pings under
+  load. With autonegotiation nothing was lost. The S3 board had the same loss (~86%) until
   it was switched to autonegotiation.
 - **Corrupted frames**: at 100 Mbit about 1 in 60000 frames from the wired device came out of
   the W5500 with a wrong TCP checksum, with both modules. The frames were fine on the wire
@@ -196,10 +198,13 @@ needs on the wire. It also polls the command register instead of sleeping 10 ms.
 
 Other changes:
 
-- A "send complete" that arrives after the wait deadline counts as sent. Before, a bridge task
-  preempted past the deadline reported the frame as failed and left the flag set for the next
-  frame, which then started the frame after it mid-transmission. At 10 Mbit that closed the
-  socket every few seconds during downloads.
+- "Send complete" is read once more after the wait deadline before a frame counts as failed.
+  Before, a bridge task preempted past the deadline reported a sent frame as failed and left the
+  flag set for the next frame, which then started the frame after it mid-transmission. On the
+  single-core S2 that hit ~60 frames per 16 downloads of 5 MB.
+- The socket status register is read at 0x0003. ESP-IDF's header has 0x0004 (Sn_PORT0, always 0
+  in MACRAW mode); upstream never reads it, but the recovery below took every failed send for a
+  closed socket and reopened it, which put the receive pointers out of step.
 - If the W5500 resets itself, the driver restores its setup when the link comes back, or on the
   next failed send when the reset was too short for esp_eth to notice the link drop. Before,
   the chip stayed silent until a power cycle.

@@ -9,8 +9,8 @@
  *    Upstream gives up after ~10 SPI reads, before a long frame has left a
  *    10 Mbit link; the next SEND then lands mid-frame and frames get lost
  *    (~35% of a TCP download). Overlapping the next frame's SPI copy with
- *    the previous frame's wire time was tried and loses frames again. A
- *    SEND_OK seen after the deadline still counts as sent.
+ *    the previous frame's wire time was tried and loses frames again. SEND_OK
+ *    is read once more after the deadline before a frame counts as failed.
  *  - command register polling busy-waits briefly instead of sleeping 10 ms.
  *  - constructor renamed to bridge_eth_mac_new_w5500 to avoid clashing with
  *    the ESP-IDF copy.
@@ -658,26 +658,25 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     int retry = 0;
     uint8_t status = 0;
     for (;;) {
+        // wifi-bridge: take the time before reading SEND, and check SEND
+        // before giving up. A task preempted past the deadline (by WiFi, and
+        // on the S2 by TinyUSB) otherwise failed a frame that had been sent
+        // and left SEND set, so the next frame returned before it was sent
+        // and the one after that was sent mid-frame. On the S2 that was ~60
+        // frames per 16 downloads of 5 MB.
+        bool late = esp_timer_get_time() > deadline;
         ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_IR(0), &status, sizeof(status)), err, TAG, "read SOCK0 IR failed");
-        // wifi-bridge: check SEND before the deadline. A task preempted past
-        // the deadline (WiFi runs at a higher priority) otherwise failed a
-        // frame that had been sent and left SEND set, so the next frame
-        // returned before it was sent and the one after that was sent
-        // mid-frame. At 10 Mbit that closed the socket every few seconds
-        // during downloads.
         if (status & W5500_SIR_SEND) {
             break;
         }
-        if ((retry++ == 3 && !is_w5500_sane_for_rxtx(emac)) || esp_timer_get_time() > deadline) {
+        if ((retry++ == 3 && !is_w5500_sane_for_rxtx(emac)) || late) {
             // wifi-bridge: a chip reset can come and go between two link checks,
             // so esp_eth never calls start() again. Reopen the socket once the
-            // link is back. Only a closed socket, read twice: reopening an open
-            // one (after one bad SPI read of its status) put the RX pointers
-            // out of step.
-            uint8_t sr2 = 0xff, phycfgr = 0;
+            // link is back. Only a closed one: reopening an open socket puts
+            // the RX pointers out of step.
+            uint8_t phycfgr = 0;
             if (w5500_restore_after_reset(emac) == ESP_OK &&
                     w5500_read(emac, W5500_REG_SOCK_SR(0), &status, sizeof(status)) == ESP_OK && status == W5500_SSR_CLOSED &&
-                    w5500_read(emac, W5500_REG_SOCK_SR(0), &sr2, sizeof(sr2)) == ESP_OK && sr2 == W5500_SSR_CLOSED &&
                     w5500_read(emac, W5500_REG_PHYCFGR, &phycfgr, sizeof(phycfgr)) == ESP_OK && (phycfgr & W5500_PHYCFGR_LNK)) {
                 ESP_LOGW(TAG, "socket 0 is closed, reopening it");
                 mac->start(mac);
