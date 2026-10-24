@@ -48,12 +48,13 @@ Measured through a Realtek USB 2.5G adapter on a Mac, to the internet over WiFi 
 
 | | `esp32-s3-poe` | `lolin-s2-mini` | `esp32-uno-shield` | `esp32-w5500` |
 |---|---|---|---|---|
-| Ethernet link | 10 Mbit full (forced) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
+| Ethernet link | 10 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
 | Download (WiFi → Ethernet) | ~700 KB/s | ~880 KB/s | ~220 KB/s | ~1.4 MB/s |
 | Upload (Ethernet → WiFi) | ~1.0 MB/s | ~560 KB/s | ~130-150 KB/s | ~570 KB/s (~820 KB/s for 5 MB) |
-| Ping to the router | ~7 ms average, 0% loss | ~10 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
+| Ping to the router | ~8-20 ms average, 0% loss | ~10 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
 
-The W5500 on the S3 board can't hold 100 Mbit, so its link is forced to 10 Mbit. The W5500
+The W5500 on the S3 board can't hold 100 Mbit. It autonegotiates, and the link flaps for ~15 s
+until the Mac's adapter settles on 10 Mbit (S3 measured 2026-10-24 at -63 dBm). The W5500
 module on the S2 Mini runs at 100 Mbit. There the limit is WiFi: the S2 Mini only transmits
 reliably at reduced power (see below).
 
@@ -99,7 +100,7 @@ top of [sdkconfig.defaults](sdkconfig.defaults). The bridge's own options are de
 | `CONFIG_BRIDGE_SPI_MHZ` | SPI clock. Above 26 MHz the pins must be the IO_MUX pins of that SPI host. The W5100 is rated for 14 MHz. |
 | `CONFIG_BRIDGE_ETH_AUTONEGOTIATE` | `n` forces the link mode below. W5500 only. |
 | `CONFIG_BRIDGE_ETH_SPEED_10M` / `_100M` | Forced speed. |
-| `CONFIG_BRIDGE_ETH_DUPLEX_HALF` / `_FULL` | Forced duplex. Must match the wired device: an autonegotiating device falls back to half duplex against a forced link, some (e.g. Realtek USB 2.5G adapters) only do full. A mismatch shows up as slow WiFi → Ethernet throughput. |
+| `CONFIG_BRIDGE_ETH_DUPLEX_HALF` / `_FULL` | Forced duplex. Must match the wired device: an autonegotiating device falls back to half duplex against a forced link. The Mac's USB adapter did, although macOS showed full duplex: forced full lost ~80% of the frames to it under two-way traffic, while single transfers looked fine. Forced half made the W5500 close its socket over and over. Prefer autonegotiation. |
 | `CONFIG_BRIDGE_WIFI_MAX_TX_POWER` | In 0.25 dBm units, `0` for the chip default. |
 
 ESP-IDF only applies defaults to a new configuration, so after editing a defaults file delete
@@ -158,7 +159,8 @@ the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 mo
 - **Don't force 10 Mbit with the Mac's USB adapter.** At forced 10 Mbit full, ~80% of the frames
   from the bridge to the Mac were lost while the Mac was also sending, so parallel uploads (as
   speedtest.net does) stalled and reset. At forced half duplex the W5500 closed its socket over
-  and over. With autonegotiation nothing was lost.
+  and over. With autonegotiation nothing was lost. The S3 board had the same loss (~86%) until
+  it was switched to autonegotiation.
 - **Corrupted frames**: at 100 Mbit about 1 in 60000 frames from the wired device came out of
   the W5500 with a wrong TCP checksum, with both modules. The frames were fine on the wire
   (the Mac's adapter computes the checksums), and reading a known pattern from the W5500 during

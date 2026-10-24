@@ -14,9 +14,10 @@ CONFIG_BRIDGE_PIN_RST=15
 CONFIG_BRIDGE_SPI_MHZ=36
 
 # This board's W5500 can't hold 100 Mbit: forced 100 Mbit gets no link, and
-# autonegotiation picks 100 Mbit and drops it every few seconds. Autonegotiate
-# does work with peers that downshift after failed 100 Mbit attempts (the
-# link flaps for ~15 s first).
-CONFIG_BRIDGE_ETH_AUTONEGOTIATE=n
-CONFIG_BRIDGE_ETH_SPEED_10M=y
-CONFIG_BRIDGE_ETH_DUPLEX_FULL=y
+# autonegotiation picks 100 Mbit and drops it every few seconds, until a peer
+# that downshifts settles on 10 Mbit (the link flaps for ~15 s first). The
+# Mac's USB adapter does. Forced 10 Mbit full made it fall back to half duplex
+# (macOS still showed full): ~86% of frames to it were lost under two-way
+# traffic and parallel uploads stalled. With a peer that doesn't downshift,
+# force 10 Mbit with the duplex the peer ends up in.
+CONFIG_BRIDGE_ETH_AUTONEGOTIATE=y

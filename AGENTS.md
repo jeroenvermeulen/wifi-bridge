@@ -103,7 +103,11 @@ minutes.
 ## Hardware quirks (learned the hard way)
 
 ESP32-S3 PoE board:
-- Its W5500 can't hold 100 Mbit, so the link is forced to 10 Mbit full.
+- Its W5500 can't hold 100 Mbit. It autonegotiates: the link flaps for ~15 s
+  until the Mac's adapter downshifts to 10 Mbit. Forced 10 Mbit full lost
+  ~86% of frames toward the Mac under two-way traffic (8 parallel uploads:
+  2 reset); autoneg: none lost, ~1.1 MB/s up, ~720 KB/s down (5 MB, -63 dBm,
+  2026-10-24).
 - Needs a USB-A to USB-C cable; RST has a pull-down that the driver releases.
 
 LOLIN S2 Mini:
@@ -158,9 +162,11 @@ ESP32 + W5500 module (esp32-w5500), first a blue AliExpress module, now a USR-ES
   were lost under two-way traffic (compare `netstat -I en20` Ipkts with the
   bridge's wifi->eth count), so speedtest.net's parallel uploads stalled.
   Single streams hid it. Forced half duplex: the W5500 closed its socket in
-  a loop (218 reopens) and the bridge stopped forwarding. The S3 board is
-  forced to 10 Mbit full too; it may have the same loss with this adapter
-  (untested).
+  a loop (218 reopens) and the bridge stopped forwarding. The S3 board had
+  the same loss (~86%) at forced 10 Mbit full; it now autonegotiates (see
+  below). Likely the adapter falls back to half duplex against a forced link
+  while macOS keeps showing full-duplex: losses are only toward the Mac and
+  only while it transmits.
 - At 100 Mbit about 1 in 60000 frames from the Mac leaves the W5500 with a
   bad TCP checksum (both modules). Located by checking checksums in the
   bridge plus a task that read a known pattern from the W5500's socket 1
