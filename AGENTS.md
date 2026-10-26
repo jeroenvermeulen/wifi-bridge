@@ -15,7 +15,7 @@ address (MAC cloning) and copies raw Ethernet frames between a W5500 or W5100
 
 | Path | Purpose |
 |------|---------|
-| `src/main.c` | Everything bridge-related: MAC learning (never stored), LAN guard, leaving WiFi when the device is gone, RX callbacks, the two forwarding tasks (eth->wifi drops frames with bad IPv4/TCP/UDP checksums), WiFi/Ethernet setup, stats log every 10 s |
+| `src/main.c` | Everything bridge-related: MAC learning (never stored), LAN guard, leaving WiFi when the device is gone, RX callbacks, the two forwarding tasks (eth->wifi drops frames with bad IPv4/TCP/UDP checksums), WiFi/Ethernet setup, optional TX/RX activity LEDs (a 30 ms timer compares frame counters), stats log every 10 s |
 | `src/w5500/w5500_mac.c` | Patched copy of the ESP-IDF 5.4.1 W5500 MAC driver (changes marked `wifi-bridge:`) |
 | `src/w5100/w5100.c` | Our own W5100 MAC + PHY driver (ESP-IDF has none); drives the SPI registers directly |
 | `src/usb_console.c` | TinyUSB CDC console for boards without USB-Serial/JTAG (ESP32-S2); no-op elsewhere |

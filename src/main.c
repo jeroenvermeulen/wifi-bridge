@@ -91,6 +91,9 @@ void usb_console_init(void);  // no-op unless the board uses TinyUSB, see usb_co
 #define LAN_WINDOW_US (10 * 1000 * 1000)
 #define LAN_HOLD_US (60 * 1000 * 1000)
 #define STATS_INTERVAL_MS 10000
+// A frame takes microseconds, too short to see: each tick, an LED is on if
+// frames passed since the last tick. Single frames flash, traffic stays lit.
+#define LED_TICK_MS 30
 // Roaming: on a multi-AP network the bridge was seen stuck on a far AP at
 // -86 dBm (~70 KB/s). Below ROAM_RSSI, scan every ROAM_CHECK_STATS stats
 // intervals and reconnect if another AP is at least ROAM_GAIN_DB stronger.
@@ -124,6 +127,7 @@ static struct {
     uint32_t tx_slow;
     int64_t tx_us_total, tx_us_max;
 } s_stats;
+static volatile uint32_t s_eth_in;  // frames from the wired device, for the RX LED
 
 // The W5500 receives a copy of every frame it transmits. Remember the source
 // MACs of recently transmitted frames so those echoes can be told apart from
@@ -194,6 +198,7 @@ static esp_err_t eth_rx(esp_eth_handle_t eth, uint8_t *buffer, uint32_t len, voi
     bool forward = false, notify = false;
     // Echoes carry WiFi-side source MACs: never clone or count them.
     bool echo = len >= 14 && is_echo(src, now);
+    if (!echo) s_eth_in++;
 
     if (len >= 14 && !(src[0] & 0x01) && !echo) {
         portENTER_CRITICAL(&s_mac_lock);
@@ -337,6 +342,37 @@ static void wifi2eth_task(void *arg)
         else s_stats.wifi2eth_txerr++;
         esp_wifi_internal_free_rx_buffer(f.eb);
     }
+}
+
+// ---------------------------------------------------------------- LEDs
+
+static uint64_t pin_bit(int pin) { return pin >= 0 ? 1ULL << pin : 0; }
+
+static void led_set(int pin, bool on)
+{
+    if (pin >= 0) gpio_set_level(pin, on);
+}
+
+static void led_tick(void *arg)
+{
+    static uint32_t last_tx, last_rx;
+    uint32_t tx = s_stats.wifi2eth, rx = s_eth_in;
+    led_set(CONFIG_BRIDGE_PIN_LED_TX, tx != last_tx);
+    led_set(CONFIG_BRIDGE_PIN_LED_RX, rx != last_rx);
+    last_tx = tx;
+    last_rx = rx;
+}
+
+static void leds_init(void)
+{
+    uint64_t mask = pin_bit(CONFIG_BRIDGE_PIN_LED_TX) | pin_bit(CONFIG_BRIDGE_PIN_LED_RX);
+    if (!mask) return;
+    gpio_config_t io = {.pin_bit_mask = mask, .mode = GPIO_MODE_OUTPUT};
+    ESP_ERROR_CHECK(gpio_config(&io));
+    const esp_timer_create_args_t args = {.callback = led_tick, .name = "leds"};
+    esp_timer_handle_t timer;
+    ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(timer, LED_TICK_MS * 1000));
 }
 
 // ---------------------------------------------------------------- events
@@ -610,6 +646,7 @@ void app_main(void)
     xTaskCreate(eth2wifi_task, "eth2wifi", 4096, NULL, 15, NULL);
     xTaskCreate(wifi2eth_task, "wifi2eth", 4096, NULL, 15, NULL);
     xTaskCreate(stats_task, "stats", 4096, NULL, 1, NULL);
+    leds_init();
 
     wifi_init();
     while (!eth_init()) vTaskDelay(pdMS_TO_TICKS(5000));

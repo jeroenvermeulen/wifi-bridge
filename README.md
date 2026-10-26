@@ -96,6 +96,7 @@ top of [sdkconfig.defaults](sdkconfig.defaults). The bridge's own options are de
 | `CONFIG_BRIDGE_PIN_MOSI`, `_MISO`, `_SCLK`, `_CS` | SPI wiring. |
 | `CONFIG_BRIDGE_PIN_INT` | Chip interrupt; `-1` polls instead, and keeps the W5500's INT output quiet. |
 | `CONFIG_BRIDGE_PIN_RST` | Chip reset; `-1` if not connected. |
+| `CONFIG_BRIDGE_PIN_LED_TX`, `_RX` | Activity LEDs, active high; `-1` for none. TX: frames out the Ethernet port. RX: frames in from it. |
 | `CONFIG_BRIDGE_SPI_HOST_SPI2` / `_SPI3` | SPI host. SPI2 unless set; the ESP32's VSPI is SPI3. |
 | `CONFIG_BRIDGE_SPI_MHZ` | SPI clock. Above 26 MHz the pins must be the IO_MUX pins of that SPI host. The W5100 is rated for 14 MHz. |
 | `CONFIG_BRIDGE_ETH_AUTONEGOTIATE` | `n` forces the link mode below. W5500 only. |
@@ -150,6 +151,9 @@ the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 mo
 | ESP32 GPIO | 18 | 23 | 19 | 5 | 17 | 16 |
 
 RST and INT stay off GPIO21/22 to keep the ESP32's usual I2C pins free.
+
+Activity LEDs: green TX on GPIO25, yellow RX on GPIO26, each wired GPIO → 330 Ω → LED → GND
+(about 4 mA). A deep green LED (~3 V forward voltage) needs about 100 Ω to be bright enough.
 
 - **The INT wire can reset the W5500.** With the blue module, the W5500 reset itself 3 to 8
   times per 80 MB of uploads: every register back at its default and the link down for 2

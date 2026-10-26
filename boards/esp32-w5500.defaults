@@ -10,15 +10,19 @@ CONFIG_BRIDGE_PIN_MOSI=23
 CONFIG_BRIDGE_PIN_MISO=19
 CONFIG_BRIDGE_PIN_SCLK=18
 CONFIG_BRIDGE_PIN_CS=5
-CONFIG_BRIDGE_PIN_RST=21
+CONFIG_BRIDGE_PIN_RST=17
 CONFIG_BRIDGE_SPI_MHZ=40
 
 # With the blue module's wiring, INT's edges reset the W5500 3-8 times per
 # 80 MB of uploads (crosstalk); that board needed -1 here. The USR-ES1: no
 # resets in 80 MB.
-CONFIG_BRIDGE_PIN_INT=22
+CONFIG_BRIDGE_PIN_INT=16
+
+# Activity LEDs, each through 330 ohm to GND (~4 mA): green TX, yellow RX.
+CONFIG_BRIDGE_PIN_LED_TX=25
+CONFIG_BRIDGE_PIN_LED_RX=26
 
 # Forced 10 Mbit full lost ~80% of the frames to the Mac's USB adapter under
-# traffic in both directions (8 parallel uploads stalled), and half duplex
-# made the W5500 close its socket over and over.
+# traffic in both directions (8 parallel uploads stalled). Forced half duplex
+# works but lost 11% of pings under load.
 CONFIG_BRIDGE_ETH_AUTONEGOTIATE=y
