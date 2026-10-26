@@ -25,7 +25,7 @@ address (MAC cloning) and copies raw Ethernet frames between a W5500 or W5100
 | `sdkconfig.defaults` | Settings shared by all boards (WiFi buffer counts etc.) |
 | `platformio.ini` | One environment per board; each points `board_build.cmake_extra_args` at its defaults file |
 | `src/wifi_credentials.h` | Gitignored; copy from `wifi_credentials.example.h`. Never commit real credentials |
-| `tools/` | `serial_log.py` (log reader that doesn't reset the board), `bridge_test.sh` (traffic test), `w5500-probe` (finds W5500 GPIOs) |
+| `tools/` | `serial_log.py` (log reader that doesn't reset the board), `bridge_test.sh` (short traffic test), `stress_test.sh` (16x5 MB each way with the log and frame counters), `w5500-probe` (finds W5500 GPIOs) |
 
 Generated, all gitignored: `sdkconfig.<env>`, `managed_components/`,
 `dependencies.lock`, `.pio/`.
@@ -91,10 +91,23 @@ The user lets agents flash and test. Typical setup on the user's Mac:
 - Traffic test: `sh tools/bridge_test.sh en20` (ping, 5 MB down, 3 MB up).
   It is too short to catch faults that happen once per 10-20 MB: on
   esp32-w5500 several "clean" runs turned out to be luck. For a verdict,
-  run 16 uploads of 5 MB (`head -c 5000000 /dev/urandom | curl --interface
-  en20 --data-binary @- https://speed.cloudflare.com/__up`) and 16
-  downloads, then count curl failures (also TLS "bad record mac") and the
-  W5500 driver's warnings in the log.
+  run `sh tools/stress_test.sh en20 /dev/cu.usbserial-0001` (starts the log
+  reader itself, waits for WiFi, 16 downloads and 16 uploads of 5 MB, ~3
+  minutes): it reports curl failures (also TLS "bad record mac"), the
+  driver's warnings, the last stats lines, and the Mac's frame counts.
+  **Compare the Mac's "out" frames with the bridge's eth->wifi total
+  (forwarded + qfull + txerr + badsum)**: the difference is frames the
+  W5500 dropped itself, which no counter shows (~1.7% during uploads).
+- Before/after comparisons need the stress test, not bridge_test.sh: the
+  3 MB upload varies by 10% between runs. Run A and B back to back.
+- The stats log's "cpu:" line (per-task CPU, percent of one core) tells
+  which side is the bottleneck. The "eth rx"/"eth tx" lines give the time
+  per frame in the W5500 driver; the SPI transfer of a full frame at 40 MHz
+  is ~325 us of it, the rest is small register transactions at ~25-30 us
+  each.
+- Baseline the network first: the same curl via the Mac's own interfaces
+  (`--interface en7`/`en0`). On 2026-10-26 the internet did 11 MB/s down
+  and 2.8 MB/s up, so the bridge was the limit, not the network.
 - Link state: `ifconfig en20 | grep media`.
 
 Wrap long-running commands in `timeout`; a hung esptool otherwise blocks for
@@ -194,6 +207,23 @@ ESP32 + W5500 module (esp32-w5500), first a blue AliExpress module, now a USR-ES
 - Measured 2026-10-24 with the USR-ES1 through en20 at -37 to -44 dBm:
   ~1.4 MB/s down, ~820 KB/s up (5 MB; ~570 KB/s in bridge_test's 3 MB),
   ping ~8 ms, 8 parallel uploads ~0.9 MB/s shared evenly with 0% ping loss.
+- 2026-10-26 performance work (stress_test.sh, 16x5 MB each way, -40 dBm):
+  baseline 1439 KB/s down / 674 up. Block-ack windows 6->32 alone: no
+  change (and more wifi->eth qfull, bigger bursts into a slow TX path);
+  A/B on the final driver: 1969/740 with 32 vs 1913/690 with 6, so kept.
+  Deferred SEND_OK wait in the driver: 1783 down (eth tx 658->452 us per
+  frame, wifi->eth qfull 741->49). Bulk RX reads: no throughput change but
+  the chip drains ~30% faster. Longer WiFi TX retry (50 ms instead of
+  5 ms): txerr 203->2. Final: see README. Upload stays ~0.7 MB/s: the Mac's
+  TSO bursts (64 KB at 100 Mbit) overflow the W5500's 16 KB RX memory, drain
+  speed can't fix that (12.5 MB/s in, ~3.3 MB/s out), and PAUSE frames are
+  not an option (the W5500 doesn't advertise flow control). A sender with a
+  16 KB send buffer has no loss but is RTT-bound (~575 KB/s at ~28 ms).
+  UDP floods (`udp_flood.py`-style, 1400 B) showed the WiFi TX side itself
+  forwards ~2 MB/s with 0.5% drops.
+- Don't bother with: curl `--limit-rate` as a pacing test (each write is
+  still a burst), 80 MHz SPI (ESP32 full-duplex MISO timing), forcing
+  10 Mbit to avoid bursts (the forced-link frame loss above).
 
 ## Conventions
 

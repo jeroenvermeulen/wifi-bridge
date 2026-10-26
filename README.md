@@ -49,17 +49,21 @@ Measured through a Realtek USB 2.5G adapter on a Mac, to the internet over WiFi 
 | | `esp32-s3-poe` | `lolin-s2-mini` | `esp32-uno-shield` | `esp32-w5500` |
 |---|---|---|---|---|
 | Ethernet link | 10 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) | 100 Mbit full (autonegotiated) |
-| Download (WiFi → Ethernet) | ~700 KB/s | ~840 KB/s | ~220 KB/s | ~1.4 MB/s |
-| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~625 KB/s | ~130-150 KB/s | ~570 KB/s (~820 KB/s for 5 MB) |
-| Ping to the router | ~8-20 ms average, 0% loss | ~5.5 ms average, 0% loss | ~12 ms average, 0% loss | ~8 ms average, 0% loss |
+| Download (WiFi → Ethernet) | ~700 KB/s | ~840 KB/s | ~220 KB/s | ~1.9-2.0 MB/s |
+| Upload (Ethernet → WiFi) | ~1.0 MB/s | ~625 KB/s | ~130-150 KB/s | ~740 KB/s (5 MB) |
+| Ping to the router | ~8-20 ms average, 0% loss | ~5.5 ms average, 0% loss | ~12 ms average, 0% loss | ~4-5 ms average, 0% loss |
 
 The W5500 on the S3 board can't hold 100 Mbit. It autonegotiates, and the link flaps for ~15 s
 until the Mac's adapter settles on 10 Mbit (S3 measured 2026-10-24 at -63 dBm). The W5500
 module on the S2 Mini runs at 100 Mbit (measured 2026-10-24 at -44 dBm). There the limit is WiFi: the S2 Mini only transmits
 reliably at reduced power (see below).
 
-On `esp32-w5500` (WiFi at -37 to -44 dBm) the 3 MB upload of the test is mostly TCP ramp-up;
-5 MB uploads average ~820 KB/s. Eight parallel uploads share ~0.9 MB/s evenly.
+`esp32-w5500` numbers are from `tools/stress_test.sh` on 2026-10-26 (16 downloads and 16 uploads
+of 5 MB, WiFi at -40 dBm, no failed transfers), after the transmit and receive changes to the
+W5500 driver described [below](#w5500-driver-patch); before them it did ~1.4 MB/s down and
+~670 KB/s up. The same internet connection does 11 MB/s down and 2.8 MB/s up from the Mac
+directly. Eight parallel uploads shared ~0.9 MB/s evenly (2026-10-24). Uploads are limited by
+the wired device's bursts, see the [W5500 module notes](#esp32--w5500-module-notes).
 
 On `esp32-uno-shield` (WiFi at -43 dBm) the W5100's SPI is the limit: it moves one byte per
 3.5 µs, about 280 KB/s at best, and a full-size frame takes ~5 ms each way.
@@ -175,6 +179,16 @@ Activity LEDs: green TX on GPIO25, yellow RX on GPIO26, each wired GPIO → 330 
   uploads of 5 MB). The bridge now drops them: 48 uploads, no errors.
 - The SPI itself is clean: 600 MB read back without an error at 40 MHz with WiFi off, also with
   frame-sized lengths.
+- **Uploads are limited by bursts from the wired device.** The W5500 holds 16 KB of received
+  data and the ESP32 drains it at ~3.3 MB/s, but the Mac (TCP segmentation offload on) puts up
+  to 64 KB on the 100 Mbit wire in 5 ms. The chip then drops frames without any counter showing
+  it; only comparing the Mac's sent-frame count with the bridge's received count reveals it
+  (~1.7% of upload frames). The resulting TCP loss keeps uploads at ~0.7 MB/s although the WiFi
+  side forwards 2 MB/s of UDP. Pacing (`curl --limit-rate`) doesn't help, since each write is
+  still a burst; a sender whose in-flight data is capped at 16 KB sees no loss but is then
+  bound by the ~28 ms round trip through the bridge and the internet (~575 KB/s). The
+  Ethernet PAUSE mechanism would be the fix, but the W5500 doesn't advertise it, so the Mac's
+  adapter won't honor it.
 - The driver recovers if the W5500 resets or its socket closes (see
   [below](#w5500-driver-patch)), so the bridge comes back after ~2 seconds instead of needing a
   power cycle.
@@ -182,7 +196,8 @@ Activity LEDs: green TX on GPIO25, yellow RX on GPIO26, each wired GPIO → 330 
 ## Monitoring
 
 The bridge logs over USB serial every 10 seconds: link states, signal strength, frame counters
-per direction, drops, and free internal memory.
+per direction, drops, free internal memory, CPU use per task, and the time per frame spent in
+the Ethernet transmit and receive paths.
 
 ```
 ~/.platformio/penv/bin/python tools/serial_log.py [PORT]
@@ -190,7 +205,9 @@ per direction, drops, and free internal memory.
 
 This opens the port without resetting the board, unlike most serial monitors.
 [tools/bridge_test.sh](tools/bridge_test.sh) runs a ping, download and upload test bound to the Mac
-interface that is wired to the bridge (default `en20`).
+interface that is wired to the bridge (default `en20`). [tools/stress_test.sh](tools/stress_test.sh)
+runs 16 downloads and 16 uploads of 5 MB with the board's log alongside and compares the Mac's
+frame counters with the bridge's; faults that happen once per 10-20 MB only show up there.
 
 ## W5500 driver patch
 
@@ -216,6 +233,16 @@ Other changes:
   frames. The driver then drops all received data and continues at the next frame. Upstream
   returned an error and its receive task spun on it until the watchdog fired.
 - When polling (no INT pin), the chip's INT output stays quiet.
+- Transmit no longer waits for the frame to leave the wire. The next frame is written into the
+  chip's TX memory while the previous one is being sent, and "send complete" of the previous
+  frame is checked just before the next SEND. Together with fewer register accesses per frame
+  (the write pointer is tracked while a frame is in flight, the free size is implied, the SEND
+  command isn't read back) a full-size frame went from ~650 µs to ~450 µs of the bridge task's
+  time, and downloads on `esp32-w5500` from ~1.4 to ~1.9 MB/s.
+- Receive reads everything the chip holds in one SPI transfer (up to 8 KB) and splits it into
+  frames in RAM, instead of ~8 small SPI transactions per frame. The chip's 16 KB receive
+  memory drains about 30% faster (~3.3 MB/s), which matters because the wired device may send
+  at 100 Mbit in bursts (see the W5500 module notes).
 
 ## W5100 driver
 
@@ -230,3 +257,5 @@ that mode has no MAC filter, so it receives every frame on the wire. See the
   to, by bit-banging SPI and reading the chip's version register.
 - [tools/serial_log.py](tools/serial_log.py): serial log reader that doesn't reset the board.
 - [tools/bridge_test.sh](tools/bridge_test.sh): traffic test through the bridge.
+- [tools/stress_test.sh](tools/stress_test.sh): 16 downloads and 16 uploads of 5 MB, with the
+  board's log and frame counters.

@@ -33,6 +33,8 @@ esp_eth_mac_t *bridge_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, 
 esp_eth_mac_t *bridge_eth_mac_new_w5100(const eth_w5500_config_t *config, const eth_mac_config_t *mac_config);
 esp_eth_phy_t *bridge_eth_phy_new_w5100(const eth_phy_config_t *config);
 void usb_console_init(void);  // no-op unless the board uses TinyUSB, see usb_console.c
+// Receive statistics of the patched W5500 driver; absent (NULL) with the W5100 driver.
+void bridge_w5500_rx_stats(uint32_t *reads, uint32_t *frames, int64_t *spi_us, int64_t *total_us) __attribute__((weak));
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -289,8 +291,12 @@ static void eth2wifi_task(void *arg)
             free(f.buf);
             continue;
         }
+        // ESP_ERR_NO_MEM: all WiFi TX buffers are in use. Wait rather than
+        // drop: 64 buffers drain in ~40 ms at the WiFi rate, and a dropped
+        // TCP segment costs far more. Giving up after 5 ms lost 62 frames
+        // in 80 MB of uploads (esp32-w5500, 2026-10-26).
         esp_err_t err = ESP_FAIL;
-        for (int tries = 0; s_wifi_up && tries < 5; tries++) {
+        for (int tries = 0; s_wifi_up && tries < 50; tries++) {
             err = esp_wifi_internal_tx(WIFI_IF_STA, f.buf, f.len);
             if (err != ESP_ERR_NO_MEM) break;
             vTaskDelay(1);
@@ -525,10 +531,45 @@ static void maybe_roam(const wifi_ap_record_t *cur)
     }
 }
 
+// CPU time per task since the previous stats line, in percent of one core,
+// for tasks at or above 1%. Shows which side limits throughput: the WiFi
+// task, the Ethernet RX task or the bridge tasks.
+static void log_cpu_use(void)
+{
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    enum { MAX_TASKS = 24 };
+    static TaskStatus_t prev[MAX_TASKS];
+    static UBaseType_t nprev;
+    static int64_t prev_us;
+    TaskStatus_t cur[MAX_TASKS];
+    uint32_t unused;
+    UBaseType_t n = uxTaskGetSystemState(cur, MAX_TASKS, &unused);
+    int64_t now = esp_timer_get_time();
+    if (prev_us) {
+        char line[200];
+        int pos = 0;
+        for (UBaseType_t i = 0; i < n && pos < (int)sizeof(line) - 24; i++) {
+            for (UBaseType_t j = 0; j < nprev; j++) {
+                if (prev[j].xTaskNumber != cur[i].xTaskNumber) continue;
+                // run time counters are microseconds (esp_timer) and wrap as uint32
+                uint32_t pct = (uint32_t)(cur[i].ulRunTimeCounter - prev[j].ulRunTimeCounter) * 100ULL / (now - prev_us);
+                if (pct >= 1) pos += snprintf(line + pos, sizeof(line) - pos, " %s %lu%%", cur[i].pcTaskName, pct);
+                break;
+            }
+        }
+        ESP_LOGI(TAG, "cpu:%s", line);
+    }
+    memcpy(prev, cur, n * sizeof(cur[0]));
+    nprev = n;
+    prev_us = now;
+#endif
+}
+
 static void stats_task(void *arg)
 {
     for (int n = 1;; n++) {
         vTaskDelay(pdMS_TO_TICKS(STATS_INTERVAL_MS));
+        log_cpu_use();
         wifi_ap_record_t ap = {0};
         if (s_wifi_up && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             ESP_LOGI(TAG, "AP " MACSTR " ch %d rssi %d dBm phy %s%s%s", MAC2STR(ap.bssid), ap.primary, ap.rssi,
@@ -542,6 +583,16 @@ static void stats_task(void *arg)
         ESP_LOGI(TAG, "internal heap free %u (min %u) | eth tx: avg %lld us, max %lld us, >5ms %lu",
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), s_stats.wifi2eth ? s_stats.tx_us_total / s_stats.wifi2eth : 0,
                  s_stats.tx_us_max, s_stats.tx_slow);
+        if (bridge_w5500_rx_stats) {
+            // Wall time per received frame in the Ethernet RX task, including
+            // waiting for the SPI bus while a frame is transmitted, and how much
+            // of it is the bulk SPI read itself (at 40 MHz: 0.2 us per byte).
+            uint32_t reads, frames;
+            int64_t spi_us, total_us;
+            bridge_w5500_rx_stats(&reads, &frames, &spi_us, &total_us);
+            ESP_LOGI(TAG, "eth rx: avg %lld us per frame (spi %lld us), %lu frames per read", frames ? total_us / frames : 0,
+                     frames ? spi_us / frames : 0, reads ? (frames + reads / 2) / reads : 0);
+        }
     }
 }
 
@@ -556,6 +607,7 @@ static bool eth_init(void)
         .sclk_io_num = CONFIG_BRIDGE_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        .max_transfer_sz = 8192,  // the W5500 driver reads received frames in bulk (DMA only)
     };
     if (!bus_ready) {
         ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &bus, ETH_SPI_DMA));
