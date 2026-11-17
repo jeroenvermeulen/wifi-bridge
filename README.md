@@ -156,7 +156,8 @@ the Uno shield board. Measured with a USR-ES1 module; a blue AliExpress W5500 mo
 
 RST and INT stay off GPIO21/22 to keep the ESP32's usual I2C pins free.
 
-Activity LEDs: green TX on GPIO25, yellow RX on GPIO26, each wired GPIO → 330 Ω → LED → GND
+Activity LEDs: yellow TX on GPIO26, green RX on GPIO25 (Ethernet side, so green lights for
+frames going out over WiFi), each wired GPIO → 330 Ω → LED → GND
 (about 4 mA). A deep green LED (~3 V forward voltage) needs about 100 Ω to be bright enough.
 
 - **The INT wire can reset the W5500.** With the blue module, the W5500 reset itself 3 to 8

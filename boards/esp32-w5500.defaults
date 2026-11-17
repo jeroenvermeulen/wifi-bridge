@@ -18,9 +18,11 @@ CONFIG_BRIDGE_SPI_MHZ=40
 # resets in 80 MB.
 CONFIG_BRIDGE_PIN_INT=16
 
-# Activity LEDs, each through 330 ohm to GND (~4 mA): green TX, yellow RX.
-CONFIG_BRIDGE_PIN_LED_TX=25
-CONFIG_BRIDGE_PIN_LED_RX=26
+# Activity LEDs, each through 330 ohm to GND (~4 mA). TX/RX are seen from the
+# Ethernet port, so green (Ethernet RX) lights when the bridge transmits on
+# WiFi and yellow (Ethernet TX) when it receives from WiFi.
+CONFIG_BRIDGE_PIN_LED_TX=26
+CONFIG_BRIDGE_PIN_LED_RX=25
 
 # Forced 10 Mbit full lost ~80% of the frames to the Mac's USB adapter under
 # traffic in both directions (8 parallel uploads stalled). Forced half duplex
